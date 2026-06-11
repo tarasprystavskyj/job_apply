@@ -211,6 +211,81 @@ def inspect_state(tab: CdpTab) -> dict[str, Any]:
 """
     )
 
+def inspect_state_precise(tab: CdpTab) -> dict[str, Any]:
+    return tab.eval(
+        r"""
+(() => {
+  const body = document.body ? document.body.innerText : "";
+  const form = document.querySelector("#apply_form");
+  const visible = e => {
+    if (!e) return false;
+    const s = getComputedStyle(e), r = e.getBoundingClientRect();
+    return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
+  };
+  const applyishControls = Array.from(document.querySelectorAll("button,a,input[type=submit],input[type=button]"))
+    .filter(visible)
+    .map(e => ({
+      tag: e.tagName,
+      text: (e.innerText || e.value || e.getAttribute("aria-label") || "").trim(),
+      className: String(e.className || ""),
+      id: e.id || "",
+      name: e.name || "",
+      href: e.href || ""
+    }))
+    .filter(e => {
+      const text = e.text.toLowerCase();
+      return text.includes("відгук") || text.includes("apply") || text.includes("надіслати") ||
+        e.className.includes("js-inbox-toggle-reply-form");
+    })
+    .slice(0, 10);
+  const alreadyApplied = location.href.includes("applied=ok") ||
+    body.includes("Ви вже відгукнулись") ||
+    body.includes("Джин відправив ваш відгук") ||
+    body.includes("Р’Рё РІР¶Рµ РІС–РґРіСѓРєРЅСѓР»РёСЃСЊ");
+  const success = body.includes("Джин відправив ваш відгук") ||
+    body.includes("Р”Р¶РёРЅ РІС–РґРїСЂР°РІРёРІ РІС–РґРіСѓРє");
+  const inactive = body.includes("Неактивна") ||
+    body.includes("Ця вакансія зараз неактивна") ||
+    body.includes("РќРµР°РєС‚РёРІРЅР°") ||
+    body.includes("Р¦СЏ РІР°РєР°РЅСЃС–СЏ Р·Р°СЂР°Р· РЅРµР°РєС‚РёРІРЅР°");
+  const profileUpdateRequired = body.includes("оновіть профіль") ||
+    body.includes("update your profile");
+  return {
+    url: location.href,
+    title: document.title,
+    body_start: body.slice(0, 1200),
+    already_applied: alreadyApplied,
+    success,
+    inactive,
+    profile_update_required: profileUpdateRequired,
+    has_apply_form: !!form,
+    has_apply_button: !!document.querySelector(".js-inbox-toggle-reply-form"),
+    applyish_controls: applyishControls,
+    alerts: Array.from(document.querySelectorAll(".alert,.toast-body,.invalid-feedback,.error,.text-danger"))
+      .map(e => e.innerText).filter(Boolean).slice(0, 20)
+  };
+})()
+"""
+    )
+
+
+def classify_no_apply_state(state: dict[str, Any], opened: dict[str, Any] | None = None) -> str:
+    if state.get("already_applied"):
+        return "already applied"
+    if state.get("inactive"):
+        return "inactive vacancy"
+    if state.get("profile_update_required"):
+        return "profile update required before Djinni allows applying"
+    controls = state.get("applyish_controls") or []
+    if controls:
+        return f"apply-like controls visible but unsupported selector: {controls[:3]}"
+    if opened and opened.get("reason"):
+        return str(opened["reason"])
+    return "no visible apply button"
+
+
+inspect_state = inspect_state_precise
+
 
 def open_apply_form(tab: CdpTab) -> dict[str, Any]:
     return tab.eval(
@@ -468,8 +543,9 @@ def process_row(row: ApplicationRow, endpoint: str, execute: bool, log_path: Pat
         time.sleep(1.0)
         if not opened.get("ok"):
             after_open = inspect_state(tab)
-            append_log(log_path, {**base_event, "result": "blocked_no_apply_form", "opened": opened, "state": after_open})
-            print(f"row {row.row_number}: blocked: {opened.get('reason')}")
+            reason = classify_no_apply_state(after_open, opened)
+            append_log(log_path, {**base_event, "result": "blocked_no_apply_form", "blocked_reason": reason, "opened": opened, "state": after_open})
+            print(f"row {row.row_number}: blocked: {reason}")
             return 3
 
         filled = fill_form(tab, row)
