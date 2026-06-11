@@ -12,7 +12,12 @@ from .models import (
     ResumeArtifact,
     VacancyObservation,
 )
-from .registry import default_registry
+
+
+def default_registry() -> PlatformRegistry:
+    from .registry import default_registry as build_default_registry
+
+    return build_default_registry()
 
 __all__ = [
     "ApprovalGate",
