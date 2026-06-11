@@ -4,4 +4,3 @@ from .workua import WorkUaAdapter
 
 
 __all__ = ["DouAdapter", "RobotaUaAdapter", "WorkUaAdapter"]
-

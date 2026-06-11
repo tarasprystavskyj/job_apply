@@ -17,6 +17,7 @@ from job_platforms.workua import (  # noqa: E402
     create_workua_review_draft,
     persist_workua_observation,
     pipeline_gate_data,
+    run_workua_public_search_once,
     snapshot_to_dict,
 )
 
@@ -122,6 +123,59 @@ class WorkUaAdapterTest(unittest.TestCase):
         self.assertFalse(gates["discover"]["requires_owner_approval"])
         self.assertTrue(gates["review_approval"]["requires_owner_approval"])
         self.assertTrue(gates["final_gated_apply_manual_handoff"]["requires_owner_approval"])
+
+    def test_run_once_persists_review_artifacts_without_submit_flags(self) -> None:
+        fetched_urls: list[str] = []
+
+        def fake_fetch(url: str) -> str:
+            fetched_urls.append(url)
+            return PUBLIC_WORKUA_HTML
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            summary = run_workua_public_search_once(
+                DiscoveryQuery(text="Python AI", limit=1),
+                db_path=tmp_path / "workua.sqlite3",
+                artifact_dir=tmp_path / "artifacts",
+                fetcher=fake_fetch,
+            )
+
+            self.assertEqual(fetched_urls, ["https://www.work.ua/jobs-Python+AI/"])
+            self.assertEqual(summary["schema"], "job.workua_run_once_summary.v0")
+            self.assertEqual(len(summary["jobs_persisted"]), 1)
+            self.assertEqual(len(summary["approval_artifacts"]), 1)
+            self.assertEqual(summary["blocker_artifacts"], [])
+            self.assertFalse(summary["submission_allowed"])
+            self.assertFalse(summary["upload_allowed"])
+
+            approval = summary["approval_artifacts"][0]
+            self.assertTrue(Path(approval["artifact_path"]).exists())
+            self.assertTrue(approval["approval_required"])
+            self.assertFalse(approval["submission_allowed"])
+            self.assertFalse(approval["upload_allowed"])
+            self.assertIn("exact message", approval["required_owner_approval"].lower())
+
+            status_by_id = {node["id"]: node["status"] for node in summary["progress_snapshot"]["nodes"]}
+            self.assertEqual(status_by_id["workua:review_approval"], "blocked_waiting_owner")
+
+    def test_run_once_writes_blocker_artifact_when_no_vacancies_extracted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            summary = run_workua_public_search_once(
+                DiscoveryQuery(text="No Match", limit=3),
+                db_path=tmp_path / "workua.sqlite3",
+                artifact_dir=tmp_path / "artifacts",
+                fetcher=lambda _url: "<html><body>No jobs here</body></html>",
+            )
+
+            self.assertEqual(summary["jobs_persisted"], [])
+            self.assertEqual(summary["approval_artifacts"], [])
+            self.assertEqual(len(summary["blocker_artifacts"]), 1)
+            blocker = summary["blocker_artifacts"][0]
+            self.assertEqual(blocker["reason"], "no_public_vacancies_extracted")
+            self.assertTrue(Path(blocker["artifact_path"]).exists())
+            self.assertFalse(blocker["submission_allowed"])
+            self.assertFalse(blocker["upload_allowed"])
 
 
 if __name__ == "__main__":
