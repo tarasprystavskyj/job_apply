@@ -10,7 +10,10 @@ Work.ua account state.
 ## Files
 
 - `src/job_platforms/workua.py`: Work.ua adapter, public HTML extractor, shared
-  DB helpers, and graph progress snapshot.
+  DB helpers, run-once public search helper, artifact writer, and graph progress
+  snapshot.
+- `src/workua_public_run_once.py`: bounded CLI wrapper for public search URL
+  fetch/read and review-only artifact generation.
 - `src/job_platforms/platforms.py`: registry-facing import for `WorkUaAdapter`.
 - `tests/test_workua_adapter.py`: safe parser, gate, shared DB, and progress
   coverage.
@@ -20,6 +23,8 @@ Work.ua account state.
 1. `discover`
    - Build public search/listing URLs with `WorkUaAdapter.discovery_urls`.
    - Example output: `https://www.work.ua/jobs-Python+AI/`.
+   - `fetch_public_workua_url` fetches only HTTP(S) pages on `work.ua` /
+     `www.work.ua`, sends no cookies, and caps response size.
 
 2. `normalize`
    - Convert caller-provided public listing/detail HTML into
@@ -55,6 +60,63 @@ Work.ua account state.
    - `persist_workua_observation` and `create_workua_review_draft` write to the
      shared SQLite DB and append events.
    - `build_workua_progress_snapshot` returns graph data for UI consumers.
+
+## Run Once CLI
+
+Safe public discovery smoke:
+
+```powershell
+python src\workua_public_run_once.py --query "Python AI" --limit 3
+```
+
+Optional explicit public search/listing URL:
+
+```powershell
+python src\workua_public_run_once.py --query "Python AI" --source-url "https://www.work.ua/jobs-Python+AI/" --limit 3
+```
+
+The CLI:
+
+- fetches public Work.ua HTML only;
+- extracts vacancies from `JobPosting` JSON-LD and public `/jobs/<id>/` links;
+- persists normalized rows into the shared SQLite DB;
+- creates local review drafts with `submission_allowed=false` and
+  `upload_allowed=false`;
+- writes approval artifacts and blocker artifacts under
+  `data/job_waves/workua_artifacts/` by default;
+- stops before any application form action.
+
+It has no execute/apply/send/upload/profile-save flag.
+
+## Artifacts
+
+Approval artifact schema: `job.workua_approval_artifact.v0`
+
+Important fields:
+
+- `job_id`
+- `outreach_id`
+- `source_url`
+- `title`
+- `company`
+- `score`
+- `fit_tags`
+- `risk_flags`
+- `draft_text`
+- `approval_required=true`
+- `submission_allowed=false`
+- `upload_allowed=false`
+- `required_owner_approval`
+
+Blocker artifact schema: `job.workua_blocker_artifact.v0`
+
+Blockers are written when public fetch/parse fails or no public vacancies are
+extracted. They also keep `submission_allowed=false` and `upload_allowed=false`.
+
+Summary artifact schema: `job.workua_run_once_summary.v0`
+
+The summary includes persisted job ids, approval artifact paths, blocker
+artifact paths, and the Work.ua progress snapshot.
 
 ## Progress Snapshot
 

@@ -4,6 +4,7 @@ import html
 import json
 import re
 import urllib.parse
+import urllib.request
 from dataclasses import asdict
 from html.parser import HTMLParser
 from pathlib import Path
@@ -21,6 +22,11 @@ from .models import (
     utcish_now,
 )
 from shared_job_db import DEFAULT_DB_PATH, add_outreach_draft, append_event, fetch_progress_rows, upsert_job
+
+
+DEFAULT_USER_AGENT = "job-apply-workua-public-discovery/1.0 (+read-only; no cookies)"
+DEFAULT_FETCH_TIMEOUT_SECONDS = 20
+DEFAULT_MAX_RESPONSE_BYTES = 1_500_000
 
 
 FIT_KEYWORDS = {
@@ -104,6 +110,11 @@ def _workua_vacancy_id(url: str) -> str:
 
 def _is_workua_vacancy_href(href: str) -> bool:
     return bool(re.search(r"/jobs/\d+/?", href))
+
+
+def _safe_artifact_name(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", value.strip())[:80].strip("._")
+    return text or "workua"
 
 
 class _VacancyAnchorCollector(HTMLParser):
@@ -364,6 +375,31 @@ def persist_workua_observation(
     return upsert_job(observation, score=workua_observation_score(observation), db_path=db_path)
 
 
+def fetch_public_workua_url(
+    url: str,
+    timeout_seconds: int = DEFAULT_FETCH_TIMEOUT_SECONDS,
+    max_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+) -> str:
+    """Fetch one public Work.ua page without cookies or browser/session state."""
+
+    adapter = WorkUaAdapter()
+    normalized_url = adapter.normalize_url(url)
+    request = urllib.request.Request(
+        normalized_url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        content_type = response.headers.get_content_charset() or "utf-8"
+        payload = response.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise ValueError(f"refusing Work.ua response larger than {max_bytes} bytes")
+    return payload.decode(content_type, errors="replace")
+
+
 def create_workua_review_draft(
     observation: VacancyObservation,
     job_id: int,
@@ -388,6 +424,165 @@ def create_workua_review_draft(
         db_path,
     )
     return outreach_id
+
+
+def _write_json_artifact(artifact_dir: Path, name: str, payload: dict[str, Any]) -> Path:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    path = artifact_dir / name
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _approval_artifact_payload(
+    observation: VacancyObservation,
+    job_id: int,
+    outreach_id: int,
+    score: int,
+    draft_text: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "job.workua_approval_artifact.v0",
+        "platform": "workua",
+        "job_id": job_id,
+        "outreach_id": outreach_id,
+        "source_url": observation.source_url,
+        "title": observation.title,
+        "company": observation.company,
+        "location": observation.location,
+        "score": score,
+        "fit_tags": list(observation.fit_tags),
+        "risk_flags": list(observation.risk_flags),
+        "draft_text": draft_text,
+        "approval_required": True,
+        "submission_allowed": False,
+        "upload_allowed": False,
+        "required_owner_approval": (
+            "Exact Work.ua vacancy, exact message, exact resume/profile choice, and final action policy. "
+            "This artifact is review-only and does not permit final submission."
+        ),
+    }
+
+
+def _blocker_artifact_payload(
+    query: DiscoveryQuery,
+    source_url: str,
+    reason: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": "job.workua_blocker_artifact.v0",
+        "platform": "workua",
+        "source_url": source_url,
+        "query": {
+            "text": query.text,
+            "location": query.location,
+            "limit": query.limit,
+        },
+        "status": "blocked",
+        "reason": reason,
+        "details": details or {},
+        "submission_allowed": False,
+        "upload_allowed": False,
+    }
+
+
+def run_workua_public_search_once(
+    query: DiscoveryQuery,
+    db_path: Path = DEFAULT_DB_PATH,
+    artifact_dir: Path | None = None,
+    fetcher: Any | None = None,
+    create_drafts: bool = True,
+) -> dict[str, Any]:
+    """Run one bounded public Work.ua discovery pass and stop at review artifacts."""
+
+    adapter = WorkUaAdapter()
+    urls = [query.source_url] if query.source_url else adapter.discovery_urls(query)
+    fetch = fetcher or fetch_public_workua_url
+    output_dir = artifact_dir or (db_path.parent / "workua_artifacts")
+    approvals: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    persisted: list[dict[str, Any]] = []
+
+    for source_url in urls:
+        try:
+            markup = fetch(source_url)
+            append_event(
+                "workua_public_search_fetched",
+                "workua",
+                None,
+                None,
+                "fetched",
+                {"source_url": source_url, "query": query.text, "limit": query.limit},
+                db_path,
+            )
+            observations = adapter.extract_public_vacancies(markup, source_url, query)[: max(0, query.limit)]
+        except Exception as exc:
+            blocker = _blocker_artifact_payload(query, source_url, "public_fetch_or_parse_failed", {"error": str(exc)})
+            path = _write_json_artifact(output_dir, f"blocker_{_safe_artifact_name(query.text)}.json", blocker)
+            blocker["artifact_path"] = str(path)
+            blockers.append(blocker)
+            append_event("workua_run_once_blocker", "workua", None, None, "blocked", blocker, db_path)
+            continue
+
+        if not observations:
+            blocker = _blocker_artifact_payload(query, source_url, "no_public_vacancies_extracted")
+            path = _write_json_artifact(output_dir, f"blocker_{_safe_artifact_name(query.text)}.json", blocker)
+            blocker["artifact_path"] = str(path)
+            blockers.append(blocker)
+            append_event("workua_run_once_blocker", "workua", None, None, "blocked", blocker, db_path)
+            continue
+
+        for observation in observations:
+            score = workua_observation_score(observation)
+            job_id = persist_workua_observation(observation, db_path=db_path)
+            row = {
+                "job_id": job_id,
+                "source_url": observation.source_url,
+                "title": observation.title,
+                "company": observation.company,
+                "score": score,
+            }
+            if create_drafts:
+                outreach_id = create_workua_review_draft(observation, job_id, db_path=db_path)
+                draft = adapter.draft_outreach(observation, default_resume_artifact())
+                approval = _approval_artifact_payload(observation, job_id, outreach_id, score, draft.cover_letter)
+                path = _write_json_artifact(output_dir, f"approval_job_{job_id}.json", approval)
+                approval["artifact_path"] = str(path)
+                approvals.append(approval)
+                row["outreach_id"] = outreach_id
+                append_event("workua_owner_approval_required", "workua", job_id, outreach_id, "needs_owner_review", approval, db_path)
+            persisted.append(row)
+
+    snapshot = build_workua_progress_snapshot(db_path=db_path)
+    summary = {
+        "schema": "job.workua_run_once_summary.v0",
+        "platform": "workua",
+        "query": {"text": query.text, "location": query.location, "limit": query.limit},
+        "source_urls": urls,
+        "jobs_persisted": persisted,
+        "approval_artifacts": approvals,
+        "blocker_artifacts": blockers,
+        "progress_snapshot": snapshot_to_dict(snapshot),
+        "submission_allowed": False,
+        "upload_allowed": False,
+    }
+    summary_path = _write_json_artifact(output_dir, f"summary_{_safe_artifact_name(query.text)}.json", summary)
+    summary["artifact_path"] = str(summary_path)
+    append_event(
+        "workua_run_once_complete",
+        "workua",
+        None,
+        None,
+        "blocked_waiting_owner" if approvals else ("blocked" if blockers else "complete"),
+        {
+            "jobs": len(persisted),
+            "approvals": len(approvals),
+            "blockers": len(blockers),
+            "artifact_path": str(summary_path),
+        },
+        db_path,
+    )
+    return summary
 
 
 def _workua_rows(db_path: Path, limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
