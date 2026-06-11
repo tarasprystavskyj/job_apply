@@ -22,6 +22,8 @@ DEFAULT_AUTO_REPLY_LOG = ROOT / "data" / "job_waves" / "recruiter_auto_replies.j
 DEFAULT_INBOX_OFFERS = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 DEFAULT_THREAD_URLS: list[str] = []
 DJINNI_THREAD_RE = re.compile(r"^https://djinni\.co/my/inbox/\d+/(?:#.*)?$")
+REJECTION_TOKENS = ["РІС–РґС…РёР»РµРЅРѕ", "can't offer", "cannot offer", "not move forward", "unfortunately"]
+ACTION_TOKENS = ["interview", "call", "meeting", "next step", "С‚РµС…РЅС–С‡РЅ", "СЃРїС–РІР±РµСЃС–Рґ"]
 
 
 @dataclass(frozen=True)
@@ -48,10 +50,15 @@ class RecruiterResponse:
 
 
 def configured_thread_urls() -> list[str]:
+    merged = list(dict.fromkeys(explicit_thread_urls() + inbox_thread_urls()))
+    return [url for url in merged if is_djinni_thread_url(url)]
+
+
+def explicit_thread_urls() -> list[str]:
     settings()
     raw = os.environ.get("JOB_APPLY_RECRUITER_RESPONSE_THREADS", "")
     urls = [url.strip() for url in raw.split(",") if url.strip()]
-    merged = list(dict.fromkeys(urls + inbox_thread_urls() + DEFAULT_THREAD_URLS))
+    merged = list(dict.fromkeys(urls + DEFAULT_THREAD_URLS))
     return [url for url in merged if is_djinni_thread_url(url)]
 
 
@@ -116,6 +123,7 @@ def classify_response(thread_url: str, state: dict[str, Any]) -> RecruiterRespon
     elif any(token in low for token in ["interview", "call", "meeting", "next step", "технічн", "співбесід"]):
         status = "positive_or_action_needed"
     recruiter_message = extract_recruiter_message(body)
+    status = classify_status(recruiter_message)
     lessons = infer_lessons(body, recruiter_message)
     recruiter_name = parse_recruiter_name(body)
     thank_you_reply = draft_thank_you_reply(company=company, role=role, recruiter_name=recruiter_name)
@@ -252,6 +260,23 @@ def needs_manual_reply(text: str) -> bool:
     )
 
 
+def contains_any(text: str, tokens: list[str]) -> bool:
+    low = text.lower()
+    return any(token in low for token in tokens)
+
+
+def is_clear_rejection(text: str) -> bool:
+    return contains_any(text, REJECTION_TOKENS)
+
+
+def classify_status(recruiter_message: str) -> str:
+    if is_clear_rejection(recruiter_message):
+        return "rejected"
+    if contains_any(recruiter_message, ACTION_TOKENS):
+        return "positive_or_action_needed"
+    return "review"
+
+
 def plan_auto_reply(
     *,
     status: str,
@@ -265,6 +290,20 @@ def plan_auto_reply(
     text = " ".join([body, recruiter_message])
     recruiter_only = recruiter_message or body
     if status == "rejected":
+        if not recruiter_message or not is_clear_rejection(recruiter_message):
+            return (
+                0.35,
+                "manual_review",
+                "",
+                "rejection status is not supported by the latest recruiter message",
+            )
+        if needs_manual_reply(recruiter_message):
+            return (
+                0.55,
+                "manual_rejection_with_action_needed",
+                "",
+                "rejection message also includes salary, scheduling, or other manual-review content",
+            )
         return (
             0.92,
             "thank_you_rejection",
@@ -295,10 +334,11 @@ def extract_recruiter_message(body: str) -> str:
         "Unfortunately",
         "Дякуємо",
     ]
+    latest_idx = -1
     for marker in markers:
-        idx = body.find(marker)
-        if idx >= 0:
-            return body[idx : idx + 600]
+        latest_idx = max(latest_idx, body.rfind(marker))
+    if latest_idx >= 0:
+        return body[latest_idx : latest_idx + 600]
     return body[-600:]
 
 
@@ -350,12 +390,14 @@ def scan_recruiter_responses(
     with output.open("w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(asdict(row), ensure_ascii=False, sort_keys=True) + "\n")
+    allowed_thread_urls = list(dict.fromkeys((thread_urls or []) + explicit_thread_urls()))
     auto_reply_events = run_auto_replies(
         rows,
         execute_send=execute_auto_reply and cfg.recruiter_auto_reply_enabled,
         enabled=auto_reply and cfg.recruiter_auto_reply_enabled,
         threshold=cfg.recruiter_auto_reply_threshold,
         log_path=auto_reply_log,
+        allowed_thread_urls=allowed_thread_urls,
         delay_sec=delay_sec,
     )
     return {
@@ -411,10 +453,12 @@ def run_auto_replies(
     enabled: bool,
     threshold: float,
     log_path: Path = DEFAULT_AUTO_REPLY_LOG,
+    allowed_thread_urls: list[str] | None = None,
     delay_sec: float = 2.0,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     existing = load_auto_reply_log(log_path)
+    allowed_threads = set(allowed_thread_urls or [])
     for row in rows:
         if not row.auto_reply_allowed or row.confidence < threshold or not row.suggested_auto_reply:
             continue
@@ -442,6 +486,11 @@ def run_auto_replies(
             continue
         if not execute_send:
             event = {**base_event, "result": "dry_run_candidate"}
+            append_auto_reply_event(log_path, event)
+            events.append(event)
+            continue
+        if row.thread_url not in allowed_threads:
+            event = {**base_event, "result": "blocked_thread_not_allowlisted_for_auto_send"}
             append_auto_reply_event(log_path, event)
             events.append(event)
             continue

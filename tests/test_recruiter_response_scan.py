@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from recruiter_response_scan import (  # noqa: E402
     RecruiterResponse,
     already_auto_replied,
+    classify_status,
     inbox_thread_urls,
     is_djinni_thread_url,
     latest_response_summary,
@@ -72,6 +73,45 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
         self.assertEqual(intent, "manual_positive_action_needed")
         self.assertEqual(message, "")
         self.assertIn("scheduling", reason)
+
+    def test_rejection_with_action_needed_stays_manual(self) -> None:
+        confidence, intent, message, reason = plan_auto_reply(
+            status="rejected",
+            body="Older page body says unfortunately.",
+            recruiter_message=(
+                "Unfortunately, we cannot move forward for this role, "
+                "but let's schedule a call about another opportunity and discuss salary."
+            ),
+            company="Example",
+            role="AI Engineer",
+            recruiter_name="",
+            public_resume_links=[],
+        )
+
+        self.assertLess(confidence, 0.8)
+        self.assertEqual(intent, "manual_rejection_with_action_needed")
+        self.assertEqual(message, "")
+        self.assertIn("manual-review", reason)
+
+    def test_rejection_status_requires_latest_recruiter_message(self) -> None:
+        confidence, intent, message, reason = plan_auto_reply(
+            status="rejected",
+            body="Unfortunately, older page text says no.",
+            recruiter_message="Could we schedule a call tomorrow?",
+            company="Example",
+            role="AI Engineer",
+            recruiter_name="",
+            public_resume_links=[],
+        )
+
+        self.assertLess(confidence, 0.8)
+        self.assertEqual(intent, "manual_review")
+        self.assertEqual(message, "")
+        self.assertIn("latest recruiter message", reason)
+
+    def test_status_is_classified_from_recruiter_message_only(self) -> None:
+        self.assertEqual(classify_status("Could we schedule a call tomorrow?"), "positive_or_action_needed")
+        self.assertEqual(classify_status("Unfortunately, we cannot move forward."), "rejected")
 
     def test_site_salary_warning_does_not_block_plain_cv_request(self) -> None:
         link = "https://drive.google.com/file/d/example/view?usp=sharing"
@@ -192,6 +232,42 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
 
         prepare.assert_not_called()
         self.assertEqual(events[0]["result"], "dry_run_candidate")
+
+    def test_auto_reply_execute_requires_thread_allowlist(self) -> None:
+        row = RecruiterResponse(
+            schema="job.recruiter_response.v0",
+            observed_at="2026-06-11T00:00:00+0300",
+            source_site="djinni",
+            thread_url="https://djinni.co/my/inbox/25880123/#last",
+            company="Example",
+            role="Python Engineer",
+            status="rejected",
+            recruiter_message="Unfortunately, no.",
+            evidence="Unfortunately, no.",
+            likely_lessons=[],
+            option_a="A",
+            option_b="B",
+            suggested_thank_you_reply="Thanks",
+            confidence=0.92,
+            auto_reply_intent="thank_you_rejection",
+            auto_reply_allowed=True,
+            auto_reply_reason="clear rejection",
+            suggested_auto_reply="Thanks",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "auto.jsonl"
+            with patch("recruiter_response_scan.prepare_or_send_thank_you") as prepare:
+                events = run_auto_replies(
+                    [row],
+                    execute_send=True,
+                    enabled=True,
+                    threshold=0.8,
+                    log_path=log_path,
+                    allowed_thread_urls=[],
+                )
+
+        prepare.assert_not_called()
+        self.assertEqual(events[0]["result"], "blocked_thread_not_allowlisted_for_auto_send")
 
 
 if __name__ == "__main__":
