@@ -10,6 +10,7 @@ send messages, or change DOU account state.
 ## Safe Scope
 
 - Adapter: `src/job_platforms/dou.py`
+- Run-once helper: `src/dou_pipeline.py`
 - Registry wiring: `default_registry().get("dou")`
 - Public hosts: `jobs.dou.ua`, `relocate.dou.ua`, and `dou.ua`
 - Shared state: `data/job_waves/job_apply_shared.sqlite3`
@@ -79,9 +80,39 @@ Observed jobs and outreach drafts are added as child nodes with public URL,
 score, tags, approval flags, and manual handoff status. Private CV text and
 account state are not included.
 
+## Run-Once Public Discovery
+
+The bounded helper fetches public DOU/Relocate DOU pages, normalizes vacancies,
+stores review-only drafts in the shared DB, and writes approval/blocker
+artifacts. It never opens an application form, uploads a resume, sends a
+message, changes account state, or reads `.env`, cookies, saved browser
+profiles, or private resume text.
+
+Default command:
+
+```powershell
+python src\dou_pipeline.py --query "Python AI" --limit 10 --max-pages 2
+```
+
+Dry-run command, with no shared DB draft/status writes:
+
+```powershell
+python src\dou_pipeline.py --query "Python AI" --limit 3 --max-pages 1 --dry-run
+```
+
+Artifacts:
+
+- `data/job_waves/dou_observations.jsonl`
+- `data/job_waves/dou_progress_snapshot.json`
+- `data/job_waves/dou_run_once_summary.json`
+- `data/job_waves/dou_blockers.json`
+
+The blocker artifact records that final submit is not implemented and that exact
+owner approval is still required per vacancy, message, resume decision, and any
+future final submit action.
+
 ## Next Integration Steps
 
-- Add a low-rate public fetch command only after query/rate limits are approved.
 - Surface DOU jobs and drafts from the shared DB in the web review queue.
 - Add owner approval UI fields for exact message/resume/final action.
 - Keep DOU final application as manual handoff until a separate prepare-only
