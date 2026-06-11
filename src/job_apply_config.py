@@ -30,6 +30,7 @@ class Settings:
     daily_hour: int
     cdp_endpoint: str
     location_preferences: str
+    djinni_profile_update_url: str
 
 
 def settings() -> Settings:
@@ -46,4 +47,5 @@ def settings() -> Settings:
             "JOB_APPLY_LOCATION_PREFERENCES",
             "Lviv onsite preferred; Kyiv remote; USA remote",
         ),
+        djinni_profile_update_url=os.environ.get("JOB_APPLY_DJINNI_PROFILE_UPDATE_URL", "https://djinni.co/my/profile/"),
     )

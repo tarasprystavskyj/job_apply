@@ -57,6 +57,7 @@ Use this guide when installing the project on another local computer.
    JOB_APPLY_RESUME_DIR=
    JOB_APPLY_LOCATION_PREFERENCES=
    JOB_APPLY_RECRUITER_RESPONSE_THREADS=
+   JOB_APPLY_DJINNI_PROFILE_UPDATE_URL=https://djinni.co/my/profile/
    ```
 
 6. Build local resume index:
@@ -123,6 +124,37 @@ python src\djinni_csv_apply.py --csv examples\approved_jobs_sample.csv
 ```
 
 Do not run `--execute` until the human has approved specific rows.
+
+## Proactive Blocker Handling
+
+When an approved application is blocked, inspect the blocker immediately and
+try to remove the blocker safely instead of only reporting failure. Examples:
+
+- Site markup changed and a selector no longer finds the apply button.
+- Djinni requires profile updates before applying.
+- A new validation message appears on the application form.
+- A supported site changes field names or confirmation flow.
+
+Do not bypass approval gates. Profile/account changes, uploads, final sends,
+rejections, and final submits still require explicit human approval.
+
+If the blocker appears to be a code/selector/browser-flow issue, delegate a
+bounded patch to a subagent using `gpt-5.5` with high reasoning when available.
+The subagent must have a narrow write scope and must not perform real
+submit/send/upload/profile/reject actions. After the patch, notify the human via
+Telegram that code was modified to remove an application blocker, including the
+blocked company, URL, files changed, and tests run.
+
+Use this guarded notification form:
+
+```powershell
+python src\job_apply_telegram_bot.py --notify-code-change "<short blocker-fix notice>" --i-understand-this-sends-telegram
+```
+
+Every blocker-fix version must repeat the verification flow before commit:
+inspect the diff, run safe targeted tests for every touched path, use an
+independent subagent for QA when browser automation/submission/Telegram/account
+state is touched, then commit and push only after tests pass.
 
 ## Djinni Inbox Workflow
 

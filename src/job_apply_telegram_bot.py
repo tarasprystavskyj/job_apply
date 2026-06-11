@@ -21,6 +21,7 @@ from vacancy_pipeline import build_candidate_batch, candidate_summary
 
 
 STATE_PATH = ROOT / "data" / "job_waves" / "telegram_state.json"
+SUBMISSION_LOG_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
 
 
 def load_state() -> dict[str, Any]:
@@ -45,6 +46,67 @@ def count_approved_djinni_rows(batch: Path) -> int:
         and row.get("approved_to_submit") == "true"
         and row.get("final_submit_allowed") == "true"
     )
+
+
+def load_submission_events(path: Path = SUBMISSION_LOG_PATH) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def latest_submission_blocker_summary(limit: int = 5) -> str:
+    cfg = settings()
+    events = load_submission_events()
+    if not events:
+        return "Submission blockers: no submission log yet."
+    latest_by_url: dict[str, dict[str, Any]] = {}
+    for event in events:
+        url = str(event.get("source_url", ""))
+        if url:
+            latest_by_url[url] = event
+    blockers = [
+        event
+        for event in latest_by_url.values()
+        if str(event.get("source_url", "")).startswith("https://djinni.co/jobs/")
+        and (
+            str(event.get("result", "")).startswith("blocked")
+            or str(event.get("blocked_reason", "")).strip()
+        )
+    ]
+    if not blockers:
+        return "Submission blockers: no active blockers in latest job states."
+    has_profile_update = any(
+        "profile update required" in str(event.get("blocked_reason", "")).lower()
+        for event in blockers
+    )
+    blockers = sorted(
+        blockers,
+        key=lambda event: (
+            "profile update required" in str(event.get("blocked_reason", "")).lower(),
+            str(event.get("attempted_at", "")),
+        ),
+        reverse=True,
+    )[:limit]
+    lines = ["Submission blockers:"]
+    for event in blockers:
+        company = event.get("company") or "unknown company"
+        result = event.get("result") or "unknown result"
+        reason = event.get("blocked_reason") or "; ".join(event.get("errors") or []) or "no detailed reason"
+        url = event.get("source_url") or ""
+        lines.append(f"- {company}: {result}; {reason}")
+        if url:
+            lines.append(str(url))
+    if has_profile_update:
+        lines.append(f"Djinni profile update: {cfg.djinni_profile_update_url}")
+    return "\n".join(lines)
 
 
 class TelegramBot:
@@ -93,9 +155,46 @@ class TelegramBot:
         lines.append("")
         lines.append(latest_response_summary())
         lines.append("")
+        lines.append(latest_submission_blocker_summary())
+        lines.append("")
         lines.append("Для підтвердження вже approved Djinni рядків: /approve_latest")
         lines.append("Для нового пошуку: /scan")
         return "\n".join(lines)
+
+    def run_submit_and_report(self, batch: str, chat_id: str | int) -> None:
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "src" / "djinni_csv_apply.py"),
+                    "--csv",
+                    batch,
+                    "--execute",
+                    "--i-understand-this-submits-applications",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            output = "\n".join(part.strip() for part in [completed.stdout, completed.stderr] if part.strip())
+            tail = "\n".join(output.splitlines()[-8:])
+            message = f"Approved batch finished with exit={completed.returncode}:\n{batch}"
+            if tail:
+                message += f"\n\nLast output:\n{tail}"
+            message += "\n\n" + latest_submission_blocker_summary()
+            self.send(chat_id, message[:3900])
+        except Exception as exc:
+            self.send(chat_id, f"Approved batch runner failed: {type(exc).__name__}: {exc}")
+
+    def run_scan_and_report(self, state: dict[str, Any], chat_id: str | int) -> None:
+        try:
+            batch = self.scan()
+            state["latest_batch"] = str(batch)
+            save_state(state)
+            self.send(chat_id, self.format_batch(batch))
+        except Exception as exc:
+            self.send(chat_id, f"Scan failed: {type(exc).__name__}: {exc}")
 
     def approve_latest(self, state: dict[str, Any], chat_id: str | int) -> None:
         batch = state.get("latest_batch")
@@ -106,30 +205,18 @@ class TelegramBot:
         if approved_count == 0:
             self.send(chat_id, "Немає approved Djinni рядків у latest batch. Підтверди рядки у web UI або CSV.")
             return
-        subprocess.Popen(
-            [
-                sys.executable,
-                str(ROOT / "src" / "djinni_csv_apply.py"),
-                "--csv",
-                batch,
-                "--execute",
-                "--i-understand-this-submits-applications",
-            ],
-            cwd=str(ROOT),
-        )
-        self.send(chat_id, f"Запустив approved batch ({approved_count} рядків):\n{batch}")
+        threading.Thread(target=self.run_submit_and_report, args=(batch, chat_id)).start()
+        self.send(chat_id, f"Запустив approved batch ({approved_count} рядків):\n{batch}\nПісля завершення надішлю результат і блокери.")
 
     def handle_text(self, chat_id: str | int, text: str, state: dict[str, Any]) -> None:
         state["chat_id"] = str(chat_id)
         command = text.strip().split()[0].lower() if text.strip() else ""
         if command in {"/start", "/status"}:
-            self.send(chat_id, f"JobApply bot ready. latest_batch={state.get('latest_batch') or 'none'}")
+            self.send(chat_id, f"JobApply bot ready. latest_batch={state.get('latest_batch') or 'none'}\n\n{latest_submission_blocker_summary()}")
             return
         if command == "/scan":
-            batch = self.scan()
-            state["latest_batch"] = str(batch)
-            save_state(state)
-            self.send(chat_id, self.format_batch(batch))
+            self.send(chat_id, "Запустив scan. Надішлю результат після завершення.")
+            threading.Thread(target=self.run_scan_and_report, args=(state, chat_id)).start()
             return
         if command == "/approve_latest":
             self.approve_latest(state, chat_id)
@@ -186,9 +273,17 @@ class TelegramBot:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="Process pending Telegram updates once and exit.")
+    parser.add_argument("--notify-code-change", default="", help="Send a code-change/blocker-fix notice to the configured chat.")
+    parser.add_argument("--i-understand-this-sends-telegram", action="store_true")
     args = parser.parse_args()
     bot = TelegramBot()
-    if args.once:
+    if args.notify_code_change:
+        if not args.i_understand_this_sends_telegram:
+            raise SystemExit("--notify-code-change requires --i-understand-this-sends-telegram")
+        if not bot.cfg.telegram_chat_id:
+            raise SystemExit("JOB_APPLY_TELEGRAM_CHAT_ID missing")
+        bot.send(bot.cfg.telegram_chat_id, args.notify_code_change)
+    elif args.once:
         state = load_state()
         count = bot.poll_once(state, timeout=1)
         print(f"processed_updates={count}")

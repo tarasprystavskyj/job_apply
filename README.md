@@ -31,6 +31,7 @@ JOB_APPLY_TELEGRAM_CHAT_ID=<your Telegram chat id, can be discovered after /star
 JOB_APPLY_RESUME_DIR=C:\path\to\your\resumes
 JOB_APPLY_LOCATION_PREFERENCES=Lviv onsite preferred; Kyiv remote; USA remote
 JOB_APPLY_RECRUITER_RESPONSE_THREADS=<optional comma-separated Djinni inbox thread URLs>
+JOB_APPLY_DJINNI_PROFILE_UPDATE_URL=https://djinni.co/my/profile/
 ```
 
 ## First Run
@@ -108,6 +109,11 @@ The bot sends a daily scan around `JOB_APPLY_DAILY_HOUR` when running
 continuously. `/scan` first refreshes Djinni inbox offers and recruiter
 responses when Chrome CDP is available, then builds the candidate batch. It
 still only submits rows already marked approved in the CSV.
+
+When a submission is blocked by Djinni profile requirements, Telegram status
+messages include the profile-update link from `JOB_APPLY_DJINNI_PROFILE_UPDATE_URL`.
+After `/approve_latest`, the bot runs the approved submitter in the background
+and sends a completion message with the latest blockers.
 
 ## Recruiter Response Review
 
