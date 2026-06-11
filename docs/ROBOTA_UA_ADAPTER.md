@@ -10,10 +10,14 @@ read browser profiles, upload resumes, click apply buttons, or submit forms.
 1. `discover`
    - Build low-rate public search URLs with `RobotaUaAdapter.discovery_urls`.
    - Example: `python src\robotaua_pipeline.py discovery-urls --query "Python AI"`
+   - Run-once live discovery is limited to HTTPS `robota.ua` `/zapros/`
+     public search pages. It does not use login, cookies, browser profiles, or
+     vacancy application forms.
 
 2. `normalize`
    - Convert saved public HTML into `job.vacancy_observation.v0`.
-   - Inputs may be public listing/detail HTML or later a public fetcher.
+   - Inputs may be saved public listing/detail HTML or bounded public
+     `run-once` search-page fetch output.
    - Output: `data/job_waves/robotaua_observations.jsonl`.
 
 3. `score`
@@ -33,6 +37,8 @@ read browser profiles, upload resumes, click apply buttons, or submit forms.
      `final_submit_allowed=false`.
    - Owner must approve exact vacancy, resume/profile, message, and final
      action before any future Robota.ua apply adapter can act.
+   - Draft and blocker records include this approval text:
+     `Approve Robota.ua application draft for exact vacancy URL <url>; resume=<exact resume name>; message=<exact approved message>; final submit allowed=<yes/no>`.
 
 6. `manual_handoff`
    - Current final state for Robota.ua is manual handoff.
@@ -46,6 +52,8 @@ read browser profiles, upload resumes, click apply buttons, or submit forms.
      `data/job_waves/robotaua_status_events.jsonl`.
    - Progress snapshots go to
      `data/job_waves/robotaua_progress_snapshot.json`.
+   - The current run-once and review paths also write a Robota-specific
+     shared-DB graph with schema `job.robotaua_progress_snapshot.langgraph.v0`.
 
 ## LangGraph-Like Progress Snapshot
 
@@ -93,6 +101,13 @@ Build review-only artifacts:
 python src\robotaua_pipeline.py build-review
 ```
 
+Fetch one public search page, normalize vacancies, create review-only DB drafts,
+and refresh the graph:
+
+```powershell
+python src\robotaua_pipeline.py run-once --query "Python AI" --limit 10 --max-pages 1 --delay-seconds 2
+```
+
 Refresh progress snapshot:
 
 ```powershell
@@ -101,8 +116,6 @@ python src\robotaua_pipeline.py progress
 
 ## Next Integration Steps
 
-- Add a low-rate public fetcher only if the owner approves live discovery rate
-  limits and query set.
 - Surface `robotaua_observations.jsonl` rows in the web UI as review-only rows.
 - Extend the shared DB-backed progress renderer to show platform-specific
   `manual_handoff` gates.
