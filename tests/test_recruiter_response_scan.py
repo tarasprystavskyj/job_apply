@@ -15,6 +15,8 @@ from recruiter_response_scan import (  # noqa: E402
     RecruiterResponse,
     already_auto_replied,
     inbox_thread_urls,
+    is_djinni_thread_url,
+    latest_response_summary,
     message_digest,
     plan_auto_reply,
     run_auto_replies,
@@ -94,6 +96,8 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
                 "\n".join(
                     [
                         json.dumps({"thread_url": "https://djinni.co/my/inbox/25880123/#last"}),
+                        json.dumps({"thread_url": "https://djinni.co/my/inbox/#"}),
+                        json.dumps({"thread_url": "https://djinni.co/my/inbox/"}),
                         json.dumps({"source_url": "https://djinni.co/jobs/1/"}),
                         json.dumps({"thread_url": "https://djinni.co/my/inbox/25880123/#last"}),
                     ]
@@ -102,6 +106,40 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
             )
 
             self.assertEqual(inbox_thread_urls(path), ["https://djinni.co/my/inbox/25880123/#last"])
+
+    def test_djinni_thread_url_requires_numeric_conversation_id(self) -> None:
+        self.assertTrue(is_djinni_thread_url("https://djinni.co/my/inbox/25880672/#last"))
+        self.assertTrue(is_djinni_thread_url("https://djinni.co/my/inbox/25880672/"))
+        self.assertFalse(is_djinni_thread_url("https://djinni.co/my/inbox/#"))
+        self.assertFalse(is_djinni_thread_url("https://djinni.co/my/inbox/"))
+        self.assertFalse(is_djinni_thread_url("https://djinni.co/jobs/831059-full-stack/"))
+
+    def test_latest_response_summary_uses_latest_rejected_row(self) -> None:
+        rows = [
+            {
+                "status": "rejected",
+                "company": "Sigma Software",
+                "role": "Senior Python AI Engineer",
+                "likely_lessons": ["lesson"],
+                "option_a": "A",
+                "option_b": "B",
+                "suggested_thank_you_reply": "Thanks",
+            },
+            {
+                "status": "review",
+                "company": "Seeking Alpha",
+                "role": "Senior Python AI Engineer",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "responses.jsonl"
+            path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+            summary = latest_response_summary(path)
+
+        self.assertIn("відмов=1", summary)
+        self.assertIn("Sigma Software", summary)
+        self.assertNotIn("Остання відмова: Seeking Alpha", summary)
 
     def test_sent_auto_reply_is_deduplicated_by_message_digest(self) -> None:
         class Row:

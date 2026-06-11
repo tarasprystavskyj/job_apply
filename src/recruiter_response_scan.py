@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -20,6 +21,7 @@ DEFAULT_OUTPUT = ROOT / "data" / "job_waves" / "recruiter_responses.jsonl"
 DEFAULT_AUTO_REPLY_LOG = ROOT / "data" / "job_waves" / "recruiter_auto_replies.jsonl"
 DEFAULT_INBOX_OFFERS = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 DEFAULT_THREAD_URLS: list[str] = []
+DJINNI_THREAD_RE = re.compile(r"^https://djinni\.co/my/inbox/\d+/(?:#.*)?$")
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,11 @@ def configured_thread_urls() -> list[str]:
     raw = os.environ.get("JOB_APPLY_RECRUITER_RESPONSE_THREADS", "")
     urls = [url.strip() for url in raw.split(",") if url.strip()]
     merged = list(dict.fromkeys(urls + inbox_thread_urls() + DEFAULT_THREAD_URLS))
-    return [url for url in merged if url.startswith("https://djinni.co/my/inbox/")]
+    return [url for url in merged if is_djinni_thread_url(url)]
+
+
+def is_djinni_thread_url(url: str) -> bool:
+    return bool(DJINNI_THREAD_RE.match(url.strip()))
 
 
 def inbox_thread_urls(path: Path = DEFAULT_INBOX_OFFERS) -> list[str]:
@@ -65,7 +71,7 @@ def inbox_thread_urls(path: Path = DEFAULT_INBOX_OFFERS) -> list[str]:
         except json.JSONDecodeError:
             continue
         url = str(row.get("thread_url") or row.get("source_url") or "").strip()
-        if url.startswith("https://djinni.co/my/inbox/"):
+        if is_djinni_thread_url(url):
             urls.append(url)
     return list(dict.fromkeys(urls))
 
@@ -481,11 +487,11 @@ def latest_response_summary(path: Path = DEFAULT_OUTPUT) -> str:
     if not rows:
         return "Відповіді рекрутерів: немає розпізнаних відповідей."
     rejected = [row for row in rows if row.get("status") == "rejected"]
-    latest = rows[-1]
     lines = [
         f"Відповіді рекрутерів: {len(rows)} діалог(ів), відмов={len(rejected)}.",
     ]
     if rejected:
+        latest = rejected[-1]
         lines.append(f"Остання відмова: {latest.get('company') or 'unknown company'} - {latest.get('role') or 'unknown role'}.")
         lessons = latest.get("likely_lessons") or []
         if lessons:
