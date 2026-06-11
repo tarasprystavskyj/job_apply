@@ -47,6 +47,7 @@ Use this guide when installing the project on another local computer.
    - Whether Djinni inbox offers may be scanned from the visible browser
      session.
    - Whether profile visibility may be toggled on from the Djinni inbox page.
+   - Which Djinni inbox recruiter-response threads should be tracked daily.
 
 5. Fill `.env`:
 
@@ -55,6 +56,7 @@ Use this guide when installing the project on another local computer.
    JOB_APPLY_TELEGRAM_CHAT_ID=
    JOB_APPLY_RESUME_DIR=
    JOB_APPLY_LOCATION_PREFERENCES=
+   JOB_APPLY_RECRUITER_RESPONSE_THREADS=
    ```
 
 6. Build local resume index:
@@ -144,3 +146,32 @@ python src\djinni_inbox_scan.py --execute-profile-toggle --i-understand-this-cha
 Rows with `recommendation=reject_candidate` are recommendations only. Do not
 click rejection controls without a separate approved rejection workflow naming
 the exact thread URL.
+
+## Recruiter Response Workflow
+
+Use:
+
+```powershell
+python src\recruiter_response_scan.py --thread-url <approved-thread-url>
+```
+
+This reads visible recruiter messages from approved Djinni inbox thread URLs and
+writes `data/job_waves/recruiter_responses.jsonl`. It is read-only: do not
+reply, archive, reject, report hire, or otherwise mutate thread state.
+
+Daily Telegram scans should include a short response summary and two options for
+how to apply lessons from rejections: conservative targeting or positioning
+upgrade.
+
+After a rejection, the scanner may draft a short thank-you reply:
+
+```powershell
+python src\recruiter_response_scan.py --thread-url <approved-thread-url> --draft-thank-you
+```
+
+Do not send that reply unless the human separately approves the exact thread,
+the exact message, and final send. The guarded send command is:
+
+```powershell
+python src\recruiter_response_scan.py --thread-url <approved-thread-url> --send-thank-you --message "<exact approved message>" --i-understand-this-sends-recruiter-message
+```

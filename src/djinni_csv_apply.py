@@ -240,14 +240,12 @@ def inspect_state_precise(tab: CdpTab) -> dict[str, Any]:
     .slice(0, 10);
   const alreadyApplied = location.href.includes("applied=ok") ||
     body.includes("Ви вже відгукнулись") ||
-    body.includes("Джин відправив ваш відгук") ||
-    body.includes("Р’Рё РІР¶Рµ РІС–РґРіСѓРєРЅСѓР»РёСЃСЊ");
+    body.includes("Джин відправив ваш відгук");
   const success = body.includes("Джин відправив ваш відгук") ||
-    body.includes("Р”Р¶РёРЅ РІС–РґРїСЂР°РІРёРІ РІС–РґРіСѓРє");
+    body.includes("Djinni sent your application");
   const inactive = body.includes("Неактивна") ||
     body.includes("Ця вакансія зараз неактивна") ||
-    body.includes("РќРµР°РєС‚РёРІРЅР°") ||
-    body.includes("Р¦СЏ РІР°РєР°РЅСЃС–СЏ Р·Р°СЂР°Р· РЅРµР°РєС‚РёРІРЅР°");
+    body.includes("inactive vacancy");
   const profileUpdateRequired = body.includes("оновіть профіль") ||
     body.includes("update your profile");
   return {

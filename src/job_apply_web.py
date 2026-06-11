@@ -137,10 +137,11 @@ def render_page() -> str:
             f"<td>{html.escape(str(item.get('attempted_at', '')))}</td>"
             f"<td>{html.escape(str(item.get('company', '')))}</td>"
             f"<td>{html.escape(str(item.get('result', '')))}</td>"
+            f"<td>{html.escape(str(item.get('blocked_reason', '')))}</td>"
             f"<td>{html.escape(str(item.get('source_url', '')))}</td>"
             "</tr>"
         )
-    log_html = "\n".join(log_rows) or "<tr><td colspan='4'>No submission log yet.</td></tr>"
+    log_html = "\n".join(log_rows) or "<tr><td colspan='5'>No submission log yet.</td></tr>"
 
     cfg = settings()
     model = html.escape(cfg.agent_model)
@@ -207,7 +208,7 @@ def render_page() -> str:
 
   <h2>Submission Log Tail</h2>
   <table>
-    <thead><tr><th>Time</th><th>Company</th><th>Result</th><th>URL</th></tr></thead>
+    <thead><tr><th>Time</th><th>Company</th><th>Result</th><th>Blocked reason</th><th>URL</th></tr></thead>
     <tbody>{log_html}</tbody>
   </table>
 </main>

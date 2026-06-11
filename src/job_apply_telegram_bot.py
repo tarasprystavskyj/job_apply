@@ -15,6 +15,7 @@ import requests
 
 from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
+from recruiter_response_scan import latest_response_summary, scan_recruiter_responses
 from resume_index import build_resume_index
 from vacancy_pipeline import build_candidate_batch, candidate_summary
 
@@ -71,6 +72,10 @@ class TelegramBot:
             scan_inbox()
         except Exception as exc:
             print(f"inbox scan skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
+        try:
+            scan_recruiter_responses()
+        except Exception as exc:
+            print(f"recruiter response scan skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return build_candidate_batch(limit=10)
 
     def format_batch(self, batch: Path) -> str:
@@ -85,6 +90,8 @@ class TelegramBot:
             if recommendation or score:
                 lines.append(f"   recommendation={recommendation} score={score}")
             lines.append(str(row.get("url")))
+        lines.append("")
+        lines.append(latest_response_summary())
         lines.append("")
         lines.append("Для підтвердження вже approved Djinni рядків: /approve_latest")
         lines.append("Для нового пошуку: /scan")

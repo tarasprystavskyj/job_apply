@@ -30,6 +30,7 @@ JOB_APPLY_TELEGRAM_BOT_TOKEN=<your Telegram bot token>
 JOB_APPLY_TELEGRAM_CHAT_ID=<your Telegram chat id, can be discovered after /start>
 JOB_APPLY_RESUME_DIR=C:\path\to\your\resumes
 JOB_APPLY_LOCATION_PREFERENCES=Lviv onsite preferred; Kyiv remote; USA remote
+JOB_APPLY_RECRUITER_RESPONSE_THREADS=<optional comma-separated Djinni inbox thread URLs>
 ```
 
 ## First Run
@@ -59,7 +60,7 @@ Use the UI:
 3. Tick checkboxes for vacancies you approve.
 4. Click `Зберегти галочки` or `Підтвердити всі Djinni`.
 5. Click `Зробити розсилку approved CSV`.
-6. Watch the status and submission log tail on the page.
+6. Watch status, submission log tail, and blocked reasons on the page.
 
 The UI also has:
 
@@ -104,9 +105,35 @@ Commands:
 - `/approve_latest`
 
 The bot sends a daily scan around `JOB_APPLY_DAILY_HOUR` when running
-continuously. `/scan` first refreshes Djinni inbox offers when Chrome CDP is
-available, then builds the candidate batch. It still only submits rows already
-marked approved in the CSV.
+continuously. `/scan` first refreshes Djinni inbox offers and recruiter
+responses when Chrome CDP is available, then builds the candidate batch. It
+still only submits rows already marked approved in the CSV.
+
+## Recruiter Response Review
+
+Configured Djinni inbox threads in `JOB_APPLY_RECRUITER_RESPONSE_THREADS` are
+checked during daily scans. The bot summarizes recruiter outcomes, including
+rejections, and proposes two ways to apply the lesson:
+
+- Option A: narrow targeting toward roles with the strongest proven fit.
+- Option B: keep broader senior AI targeting but strengthen profile/CV/cover
+  letter positioning around concrete LLM/RAG/multi-agent deliverables.
+
+The response scanner is read-only. It does not reply, archive, reject, or change
+thread state.
+
+To prepare a polite thank-you reply after a rejection:
+
+```powershell
+python src\recruiter_response_scan.py --thread-url <approved-thread-url> --draft-thank-you
+```
+
+Real sending is blocked unless the operator gives a separate approval naming
+the exact thread and exact message. CLI form:
+
+```powershell
+python src\recruiter_response_scan.py --thread-url <approved-thread-url> --send-thank-you --message "exact approved message" --i-understand-this-sends-recruiter-message
+```
 
 ## Djinni CSV Submitter
 

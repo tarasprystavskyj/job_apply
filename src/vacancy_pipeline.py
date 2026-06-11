@@ -13,6 +13,7 @@ from resume_index import list_resumes
 DEFAULT_LINKEDIN = "https://www.linkedin.com/in/taras-prystavskyj/"
 DEFAULT_SALARY_USD = 3000
 INBOX_OFFERS_PATH = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
+SUBMISSION_ATTEMPTS_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
 
 
 def latest_observations() -> list[dict[str, Any]]:
@@ -34,6 +35,62 @@ def latest_inbox_offers() -> list[dict[str, Any]]:
         if line.strip():
             rows.append(json.loads(line))
     return rows
+
+
+def is_active_public_vacancy(row: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(row.get("status", "")),
+            str(row.get("title", "")),
+            str(row.get("summary", "")),
+            " ".join(str(x) for x in row.get("risk_flags") or []),
+        ]
+    ).lower()
+    inactive_tokens = ["inactive", "неактив", "закрит", "closed"]
+    return not any(token in text for token in inactive_tokens)
+
+
+def is_actionable_inbox_offer(row: dict[str, Any]) -> bool:
+    text = " ".join([str(row.get("title", "")), str(row.get("snippet", "")), str(row.get("reason", ""))]).lower()
+    system_tokens = [
+        "відкрити листування",
+        "open conversation",
+        "we received your application",
+        "thank you for your interest",
+        "дякуємо за вашу заявку",
+        "already applied",
+    ]
+    if any(token in text for token in system_tokens):
+        return False
+    return row.get("recommendation") in {"digest", "review"}
+
+
+def latest_submission_by_url() -> dict[str, dict[str, Any]]:
+    if not SUBMISSION_ATTEMPTS_PATH.exists():
+        return {}
+    latest: dict[str, dict[str, Any]] = {}
+    for line in SUBMISSION_ATTEMPTS_PATH.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        url = str(row.get("source_url", ""))
+        if url:
+            latest[url] = row
+    return latest
+
+
+def terminal_submission_state(row: dict[str, Any], history: dict[str, dict[str, Any]]) -> str:
+    prior = history.get(str(row.get("source_url", ""))) or {}
+    result = str(prior.get("result", ""))
+    blocked_reason = str(prior.get("blocked_reason", ""))
+    if result == "already_applied":
+        return "already_applied"
+    if blocked_reason == "inactive vacancy":
+        return "inactive"
+    return ""
 
 
 def score_vacancy(row: dict[str, Any]) -> int:
@@ -133,8 +190,17 @@ def draft_cover_letter(vacancy: dict[str, Any], resume: dict[str, Any] | None) -
 
 def build_candidate_batch(limit: int = 10, output: Path | None = None) -> Path:
     out = output or ROOT / "data" / "job_waves" / f"candidate_batch_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-    public_vacancies = sorted(latest_observations(), key=batch_score, reverse=True)
-    inbox_offers = sorted(latest_inbox_offers(), key=batch_score, reverse=True)
+    history = latest_submission_by_url()
+    public_vacancies = sorted(
+        [
+            row
+            for row in latest_observations()
+            if is_active_public_vacancy(row) and terminal_submission_state(row, history) == ""
+        ],
+        key=batch_score,
+        reverse=True,
+    )
+    inbox_offers = sorted([row for row in latest_inbox_offers() if is_actionable_inbox_offer(row)], key=batch_score, reverse=True)
     inbox_quota = min(len(inbox_offers), limit, max(1, min(3, limit)))
     public_quota = max(0, limit - inbox_quota)
     vacancies = sorted(public_vacancies[:public_quota] + inbox_offers[:inbox_quota], key=batch_score, reverse=True)
