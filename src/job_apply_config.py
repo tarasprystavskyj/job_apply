@@ -31,10 +31,18 @@ class Settings:
     cdp_endpoint: str
     location_preferences: str
     djinni_profile_update_url: str
+    public_resume_links: tuple[str, ...]
+    recruiter_auto_reply_enabled: bool
+    recruiter_auto_reply_threshold: float
 
 
 def settings() -> Settings:
     load_env()
+    public_resume_links = tuple(
+        link.strip()
+        for link in os.environ.get("JOB_APPLY_PUBLIC_RESUME_LINKS", "").split(",")
+        if link.strip().startswith(("https://", "http://"))
+    )
     return Settings(
         root=ROOT,
         resume_dir=Path(os.environ.get("JOB_APPLY_RESUME_DIR", r"C:\python_scripts\projects_search\my_resumes")),
@@ -48,4 +56,8 @@ def settings() -> Settings:
             "Lviv onsite preferred; Kyiv remote; USA remote",
         ),
         djinni_profile_update_url=os.environ.get("JOB_APPLY_DJINNI_PROFILE_UPDATE_URL", "https://djinni.co/my/profile/"),
+        public_resume_links=public_resume_links,
+        recruiter_auto_reply_enabled=os.environ.get("JOB_APPLY_RECRUITER_AUTO_REPLY_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"},
+        recruiter_auto_reply_threshold=float(os.environ.get("JOB_APPLY_RECRUITER_AUTO_REPLY_THRESHOLD", "0.80")),
     )

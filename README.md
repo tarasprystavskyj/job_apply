@@ -32,6 +32,9 @@ JOB_APPLY_RESUME_DIR=C:\path\to\your\resumes
 JOB_APPLY_LOCATION_PREFERENCES=Lviv onsite preferred; Kyiv remote; USA remote
 JOB_APPLY_RECRUITER_RESPONSE_THREADS=<optional comma-separated Djinni inbox thread URLs>
 JOB_APPLY_DJINNI_PROFILE_UPDATE_URL=https://djinni.co/my/profile/
+JOB_APPLY_PUBLIC_RESUME_LINKS=<optional comma-separated public resume/profile URLs>
+JOB_APPLY_RECRUITER_AUTO_REPLY_ENABLED=false
+JOB_APPLY_RECRUITER_AUTO_REPLY_THRESHOLD=0.80
 ```
 
 ## First Run
@@ -137,6 +140,30 @@ rejections, and proposes two ways to apply the lesson:
 
 The response scanner is read-only. It does not reply, archive, reject, or change
 thread state.
+
+Optional auto-reply mode is available for low-risk recruiter replies. It is off
+by default. Enable it only after adding allowlisted public resume links:
+
+```text
+JOB_APPLY_PUBLIC_RESUME_LINKS=https://drive.google.com/file/d/.../view?usp=sharing
+JOB_APPLY_RECRUITER_AUTO_REPLY_ENABLED=true
+JOB_APPLY_RECRUITER_AUTO_REPLY_THRESHOLD=0.80
+```
+
+When enabled, daily scans may send an automatic reply only when the classifier
+confidence is at least the threshold. Current safe auto-reply intents are:
+
+- polite thank-you after a clear rejection;
+- public resume/profile link reply when the recruiter explicitly asks for a
+  resume/CV/profile link and no salary, scheduling, interview, or negotiation
+  question is present.
+
+Every attempted auto-reply is written to
+`data/job_waves/recruiter_auto_replies.jsonl`. Sent messages are deduplicated by
+thread, intent, and message digest. When an auto-reply is actually sent, the
+Telegram bot sends a notification with the thread URL and confidence score.
+Messages that ask about salary, availability, calls, interviews, test tasks, or
+other decisions remain manual-review only.
 
 To prepare a polite thank-you reply after a rejection:
 
