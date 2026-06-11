@@ -106,7 +106,22 @@ def latest_submission_blocker_summary(limit: int = 5) -> str:
             lines.append(str(url))
     if has_profile_update:
         lines.append(f"Djinni profile update: {cfg.djinni_profile_update_url}")
+        lines.extend(djinni_profile_update_proposal_lines())
     return "\n".join(lines)
+
+
+def djinni_profile_update_proposal_lines() -> list[str]:
+    return [
+        "I can prepare a Djinni profile update draft. No profile fields will be changed or saved without separate explicit approval.",
+        "Suggested profile draft:",
+        "position=Senior Python / AI Automation Engineer",
+        "salary=3000 USD",
+        "experience=More than 10 years",
+        "LinkedIn=https://www.linkedin.com/in/taras-prystavskyj/",
+        "locations=Lviv onsite/hybrid preferred; Kyiv remote; USA/EU remote",
+        "skills=Python, AI automation, LLM, Backend, FastAPI, API integrations, PostgreSQL, Docker, Playwright/Selenium, Telegram bots, GitHub Actions",
+        "Reply approval template: Approve Djinni profile update draft; final save allowed=<yes/no>.",
+    ]
 
 
 class TelegramBot:

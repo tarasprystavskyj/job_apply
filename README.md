@@ -112,6 +112,16 @@ still only submits rows already marked approved in the CSV.
 
 When a submission is blocked by Djinni profile requirements, Telegram status
 messages include the profile-update link from `JOB_APPLY_DJINNI_PROFILE_UPDATE_URL`.
+The bot also proposes a separate approval template for preparing a Djinni
+profile-update draft; profile fields must not be saved without explicit final
+profile-save approval. The suggested draft values are:
+`position=Senior Python / AI Automation Engineer`, `salary=3000 USD`,
+`experience=More than 10 years`,
+`LinkedIn=https://www.linkedin.com/in/taras-prystavskyj/`,
+`locations=Lviv onsite/hybrid preferred; Kyiv remote; USA/EU remote`, and
+`skills=Python, AI automation, LLM, Backend, FastAPI, API integrations,
+PostgreSQL, Docker, Playwright/Selenium, Telegram bots, GitHub Actions`.
+Approval template: `Approve Djinni profile update draft; final save allowed=<yes/no>`.
 After `/approve_latest`, the bot runs the approved submitter in the background
 and sends a completion message with the latest blockers.
 

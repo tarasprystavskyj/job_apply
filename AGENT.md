@@ -137,6 +137,17 @@ try to remove the blocker safely instead of only reporting failure. Examples:
 
 Do not bypass approval gates. Profile/account changes, uploads, final sends,
 rejections, and final submits still require explicit human approval.
+When a Djinni profile-update blocker appears, the Telegram bot should provide
+the profile URL and offer to prepare a profile-update draft. Do not save profile
+fields until the human approves the exact target positioning, salary/location
+values, and final save. Default draft positioning for Taras is:
+`position=Senior Python / AI Automation Engineer`, `salary=3000 USD`,
+`experience=More than 10 years`,
+`LinkedIn=https://www.linkedin.com/in/taras-prystavskyj/`,
+`locations=Lviv onsite/hybrid preferred; Kyiv remote; USA/EU remote`, and
+`skills=Python, AI automation, LLM, Backend, FastAPI, API integrations,
+PostgreSQL, Docker, Playwright/Selenium, Telegram bots, GitHub Actions`.
+Approval template: `Approve Djinni profile update draft; final save allowed=<yes/no>`.
 
 If the blocker appears to be a code/selector/browser-flow issue, delegate a
 bounded patch to a subagent using `gpt-5.5` with high reasoning when available.
