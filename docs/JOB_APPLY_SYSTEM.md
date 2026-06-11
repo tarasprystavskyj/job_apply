@@ -10,6 +10,7 @@ Implemented entry points:
 - Batch builder: `python src\vacancy_pipeline.py`
 - Djinni submitter: `python src\djinni_csv_apply.py`
 - Djinni inbox scanner: `python src\djinni_inbox_scan.py`
+- Robota.ua review-only adapter: `python src\robotaua_pipeline.py`
 
 The `.env` file contains local runtime settings:
 
@@ -49,3 +50,8 @@ Current limitation: discovery uses local observations as seed data. The next
 step is to add low-rate public-page discovery for Djinni, DOU, Work.ua, and
 Robota.ua, then pass vacancy text plus resume index into the GPT-5.3-Codex-Spark
 drafting agent.
+
+Robota.ua now has a bounded adapter slice for public HTML normalization,
+review-only draft generation, status events, and LangGraph-like progress
+snapshots. It is manual handoff only; there is no Robota.ua submit/upload/apply
+automation.

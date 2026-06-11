@@ -65,6 +65,33 @@ Required invariant:
 - `data/job_waves/`: vacancy observations, draft letters, and review queues.
 - `tmp/`: extracted text, scratch files, and non-source intermediate artifacts.
 
+## `job.platform_status_event.v0`
+
+Purpose: append-only platform pipeline status event for UI/status tracking.
+
+Required fields:
+
+- `schema`: fixed string `job.platform_status_event.v0`
+- `platform`: platform id such as `robotaua`
+- `stage`: pipeline stage, for example `normalize`, `draft`, or
+  `manual_handoff`
+- `status`: short machine-readable state
+- `message`: human-readable summary safe for UI display
+- `event_at`: ISO-8601 timestamp with timezone if known
+- `data`: small metadata object with paths/counts only, no private CV text
+
+## `job.progress_snapshot.langgraph.v0`
+
+Purpose: graph-friendly pipeline snapshot for LangGraph-like UI renderers.
+
+Required fields:
+
+- `schema`: fixed string `job.progress_snapshot.langgraph.v0`
+- `generated_at`: ISO-8601 timestamp with timezone if known
+- `nodes`: array of `{id, label, kind, status, data}`
+- `edges`: array of `{source, target, label, status}`
+- `event_tail`: recent status events
+
 ## Sensitive Data Policy
 
 Do not write secrets, cookies, saved browser profile data, passwords, or private

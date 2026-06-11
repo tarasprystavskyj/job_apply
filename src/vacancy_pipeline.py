@@ -14,16 +14,28 @@ DEFAULT_LINKEDIN = "https://www.linkedin.com/in/taras-prystavskyj/"
 DEFAULT_SALARY_USD = 3000
 INBOX_OFFERS_PATH = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 SUBMISSION_ATTEMPTS_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
+OBSERVATION_PATHS = [
+    ROOT / "data" / "job_waves" / "wave_2026-06-11_ai_automation_observations.jsonl",
+    ROOT / "data" / "job_waves" / "robotaua_observations.jsonl",
+]
 
 
 def latest_observations() -> list[dict[str, Any]]:
-    path = ROOT / "data" / "job_waves" / "wave_2026-06-11_ai_automation_observations.jsonl"
-    if not path.exists():
-        return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
+    seen_urls: set[str] = set()
+    for path in OBSERVATION_PATHS:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            url = str(row.get("source_url", ""))
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            rows.append(row)
     return rows
 
 

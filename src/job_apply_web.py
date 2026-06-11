@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
+from job_platforms.progress import build_progress_snapshot
 from resume_index import build_resume_index
 from vacancy_pipeline import build_candidate_batch, candidate_summary
 
@@ -81,6 +82,21 @@ def log_tail(path: Path, limit: int = 12) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+def event_summary(event: dict) -> str:
+    status = str(event.get("status") or "")
+    payload_text = str(event.get("payload_json") or "").strip()
+    if not payload_text:
+        return status
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return status or payload_text[:160]
+    message = str(payload.get("message") or payload.get("reason") or "").strip()
+    if message and status:
+        return f"{status}: {message}"
+    return message or status
 
 
 def scan_inbox_status(execute_profile_toggle: bool = False) -> str:
@@ -159,8 +175,8 @@ def render_page() -> str:
     body {{ font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2933; }}
     main {{ max-width: 1180px; margin: 0 auto; }}
     header {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
-    button {{ padding: 8px 12px; border: 1px solid #8aa0b2; background: #f7fafc; border-radius: 6px; cursor: pointer; }}
-    button.primary {{ background: #1f7a4d; color: white; border-color: #1f7a4d; }}
+    button, .button {{ padding: 8px 12px; border: 1px solid #8aa0b2; background: #f7fafc; border-radius: 6px; cursor: pointer; color: #1f2933; text-decoration: none; display: inline-block; }}
+    button.primary, .button.primary {{ background: #1f7a4d; color: white; border-color: #1f7a4d; }}
     table {{ width: 100%; border-collapse: collapse; margin-top: 18px; }}
     th, td {{ text-align: left; padding: 9px 8px; border-bottom: 1px solid #d9e2ec; vertical-align: top; }}
     .bar {{ display: flex; gap: 8px; margin: 18px 0; flex-wrap: wrap; }}
@@ -185,6 +201,7 @@ def render_page() -> str:
 
   <form class="bar" method="post" action="/bot-note">
     <button type="submit">Підготувати Telegram bot status</button>
+    <a class="button" href="/platform-progress">Platform progress graph</a>
   </form>
 
   <div class="status">
@@ -216,12 +233,157 @@ def render_page() -> str:
 </html>"""
 
 
+def render_platform_progress_page() -> str:
+    snapshot = build_progress_snapshot(limit=120).to_dict()
+    nodes = snapshot.get("nodes", [])
+    edges = snapshot.get("edges", [])
+    events = snapshot.get("event_tail", [])
+
+    counts: dict[str, int] = {}
+    for node in nodes:
+        status = str(node.get("status") or "pending")
+        counts[status] = counts.get(status, 0) + 1
+
+    def node_card(node: dict) -> str:
+        node_id = html.escape(str(node.get("id", "")))
+        label = html.escape(str(node.get("label", "")))
+        kind = html.escape(str(node.get("kind", "")))
+        status = html.escape(str(node.get("status", "pending")))
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        url = str(data.get("source_url") or "")
+        score = data.get("score", "")
+        meta_parts = [kind]
+        if score not in {"", None}:
+            meta_parts.append(f"score {score}")
+        link = ""
+        if url.startswith(("http://", "https://")):
+            link = f"<a href='{html.escape(url)}' target='_blank' rel='noreferrer'>open</a>"
+        return (
+            f"<article class='node status-{status}'>"
+            f"<div class='node-top'><code>{node_id}</code><span>{status}</span></div>"
+            f"<h3>{label}</h3>"
+            f"<p>{html.escape(' | '.join(str(part) for part in meta_parts if part))}</p>"
+            f"{link}"
+            "</article>"
+        )
+
+    pipeline_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "pipeline_stage")
+    job_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "job")
+    draft_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "outreach_draft")
+    if not job_html:
+        job_html = "<p class='empty'>No shared job rows yet.</p>"
+    if not draft_html:
+        draft_html = "<p class='empty'>No outreach drafts yet.</p>"
+
+    edge_rows = []
+    for edge in edges[:80]:
+        edge_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(edge.get('source', '')))}</td>"
+            f"<td>{html.escape(str(edge.get('target', '')))}</td>"
+            f"<td>{html.escape(str(edge.get('label', '')))}</td>"
+            f"<td>{html.escape(str(edge.get('status', '')))}</td>"
+            "</tr>"
+        )
+    edge_html = "\n".join(edge_rows) or "<tr><td colspan='4'>No edges yet.</td></tr>"
+
+    event_rows = []
+    for event in events[:40]:
+        event_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(event.get('created_at', '')))}</td>"
+            f"<td>{html.escape(str(event.get('event_type', '')))}</td>"
+            f"<td>{html.escape(str(event.get('platform', '')))}</td>"
+            f"<td>{html.escape(str(event.get('job_id', '')))}</td>"
+            f"<td>{html.escape(event_summary(event))}</td>"
+            "</tr>"
+        )
+    event_html = "\n".join(event_rows) or "<tr><td colspan='5'>No events yet.</td></tr>"
+
+    count_html = " ".join(
+        f"<span class='pill status-{html.escape(status)}'>{html.escape(status)}: {count}</span>"
+        for status, count in sorted(counts.items())
+    ) or "<span class='pill'>empty</span>"
+
+    generated_at = html.escape(str(snapshot.get("generated_at", "")))
+    schema = html.escape(str(snapshot.get("schema", "")))
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Platform Progress Graph</title>
+  <style>
+    body {{ font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #193229; background: #f8fbf8; }}
+    main {{ max-width: 1220px; margin: 0 auto; }}
+    header {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
+    a.button {{ padding: 8px 12px; border: 1px solid #8fb6a2; background: #ffffff; border-radius: 6px; color: #145c39; text-decoration: none; }}
+    .meta {{ color: #52675d; }}
+    .counts {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 22px; }}
+    .pill {{ display: inline-flex; padding: 5px 9px; border: 1px solid #b9d6c7; border-radius: 999px; background: #ffffff; font-size: 13px; }}
+    .graph-row {{ display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 10px; align-items: stretch; margin: 20px 0; }}
+    .node {{ border: 1px solid #b9d6c7; background: #ffffff; border-radius: 8px; padding: 10px; min-height: 96px; box-shadow: 0 1px 2px rgba(21, 92, 57, 0.08); }}
+    .node-top {{ display: flex; justify-content: space-between; gap: 8px; color: #52675d; font-size: 12px; }}
+    .node h3 {{ font-size: 15px; line-height: 1.3; margin: 10px 0 6px; }}
+    .node p {{ margin: 0 0 8px; color: #52675d; font-size: 13px; }}
+    .status-complete {{ border-color: #42a66a; background: #edf9f0; }}
+    .status-ready {{ border-color: #2f8a55; background: #e3f5ea; }}
+    .status-active, .status-seen {{ border-color: #7fb98f; background: #f1f8f2; }}
+    .status-blocked, .status-error {{ border-color: #bf6b6b; background: #fff1f1; }}
+    .section {{ margin-top: 28px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 12px; background: #ffffff; }}
+    th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #d7e5dc; vertical-align: top; }}
+    .empty {{ color: #52675d; }}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Platform Progress Graph</h1>
+      <div class="meta">Schema: {schema} | generated: {generated_at}</div>
+    </div>
+    <a class="button" href="/">Back to batches</a>
+  </header>
+  <div class="counts">{count_html}</div>
+  <section class="section">
+    <h2>Pipeline Gates</h2>
+    <div class="graph-row">{pipeline_html}</div>
+  </section>
+  <section class="section">
+    <h2>Jobs</h2>
+    <div class="cards">{job_html}</div>
+  </section>
+  <section class="section">
+    <h2>Outreach Drafts</h2>
+    <div class="cards">{draft_html}</div>
+  </section>
+  <section class="section">
+    <h2>Edges</h2>
+    <table><thead><tr><th>Source</th><th>Target</th><th>Label</th><th>Status</th></tr></thead><tbody>{edge_html}</tbody></table>
+  </section>
+  <section class="section">
+    <h2>Event Tail</h2>
+    <table><thead><tr><th>Time</th><th>Type</th><th>Platform</th><th>Job</th><th>Summary</th></tr></thead><tbody>{event_html}</tbody></table>
+  </section>
+</main>
+</body>
+</html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path != "/":
-            self.send_error(404)
+        path = urlparse(self.path).path
+        if path == "/":
+            self.respond_html(render_page())
             return
-        self.respond_html(render_page())
+        if path == "/platform-progress":
+            self.respond_html(render_platform_progress_page())
+            return
+        if path == "/platform-progress.json":
+            self.respond_json(build_progress_snapshot(limit=120).to_dict())
+            return
+        self.send_error(404)
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -312,6 +474,14 @@ class Handler(BaseHTTPRequestHandler):
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def respond_json(self, payload: dict) -> None:
+        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
