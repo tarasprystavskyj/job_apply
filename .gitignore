@@ -1,0 +1,16 @@
+tmp/
+.env
+data/raw/
+data/private/
+data/resumes/
+data/job_waves/*
+!data/job_waves/.gitkeep
+*.log
+*.sqlite
+*.db
+*.zip
+*.tar
+*.tar.gz
+*.npz
+__pycache__/
+.venv/
