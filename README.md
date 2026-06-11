@@ -116,6 +116,9 @@ Dry-run:
 python src\djinni_csv_apply.py --csv examples\approved_jobs_sample.csv
 ```
 
+The sample CSV contains a placeholder Djinni-shaped URL only for dry-run schema
+validation. Replace it with a real approved vacancy before any execute run.
+
 Real submit:
 
 ```powershell

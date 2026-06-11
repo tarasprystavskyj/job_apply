@@ -1,7 +1,7 @@
 site,url,title,company,message,message_file,salary_usd,linkedin,resume_policy,approved_resume_name,approved_to_submit,final_submit_allowed
-djinni,https://djinni.co/jobs/example-job/,Example Python AI Engineer,Example Company,"Hi Example Company team,
+djinni,https://djinni.co/jobs/000000-replace-with-approved-job-url/,Placeholder Python AI Engineer,Placeholder Company,"Hi Placeholder Company team,
 
-I am interested in this role because it matches my Python and AI automation background.
+This is placeholder dry-run text. Replace this row with a real approved Djinni vacancy before execute mode.
 
 Best regards,
 Candidate Name",,3000,https://www.linkedin.com/in/example/,no_resume,,false,false
