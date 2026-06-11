@@ -211,7 +211,7 @@ def maybe_turn_on_profile(tab: CdpTab, execute: bool) -> dict[str, Any]:
     return tab.eval(expression)
 
 
-def scan_inbox(output: Path, execute_profile_toggle: bool = False, delay_sec: float = 2.0) -> dict[str, Any]:
+def scan_inbox(output: Path = DEFAULT_OUTPUT, execute_profile_toggle: bool = False, delay_sec: float = 2.0) -> dict[str, Any]:
     cfg = settings()
     tab: CdpTab | None = None
     try:

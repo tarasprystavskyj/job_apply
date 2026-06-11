@@ -94,6 +94,8 @@ def scan_inbox_status(execute_profile_toggle: bool = False) -> str:
         profile_text = "; Djinni profile toggle clicked"
     elif profile.get("found"):
         profile_text = "; Djinni profile toggle available but not clicked"
+    elif execute_profile_toggle:
+        profile_text = "; Djinni profile toggle not found or already active"
     return (
         f"inbox offers: {result.get('offers_found', 0)} "
         f"(digest={result.get('digest', 0)}, review={result.get('review', 0)}, "

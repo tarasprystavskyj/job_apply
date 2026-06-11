@@ -88,13 +88,31 @@ Ask exactly enough to configure the assistant:
 
 ## Verification
 
-Run:
+Before every commit, inspect the current diff and test the functionality touched
+by that diff, not only the edited lines. If a function signature, caller, UI
+route, button, scheduler path, or submit path changed, exercise all affected
+callers and user-visible buttons where this can be done safely. Use a subagent
+for independent verification when the change touches browser automation,
+submission, Telegram, scheduling, or account-state actions.
+
+Minimum local checks:
 
 ```powershell
 python -m py_compile src\*.py
 python src\resume_index.py
 python src\job_apply_telegram_status.py
 ```
+
+Add targeted checks based on the diff, for example:
+
+- Web UI changes: load `http://127.0.0.1:8097/`, exercise affected buttons via
+  HTTP/browser, and verify the page status/log output.
+- Telegram changes: test command handling without sending applications unless
+  rows are explicitly approved.
+- Djinni inbox changes: run scan/profile-toggle paths only under their safety
+  gates and verify output JSONL/batch rows.
+- Submitter changes: run dry-run first; run execute only for explicitly
+  approved rows and report per-row outcomes.
 
 For browser submission, use dry-run first:
 
