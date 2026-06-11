@@ -556,6 +556,27 @@ def prepare_or_send_thank_you(
     }}
     return {{clicked: false}};
   }};
+  const clickNearTarget = (target, patterns) => {{
+    const roots = [
+      target.closest("form"),
+      target.closest(".modal, .card, .conversation, .thread, section, article"),
+      document,
+    ].filter(Boolean);
+    for (const root of roots) {{
+      const controls = Array.from(root.querySelectorAll("button,a,input[type=button],input[type=submit]"))
+        .filter(visible)
+        .reverse();
+      for (const control of controls) {{
+        const text = clean(control.innerText || control.value || control.getAttribute("aria-label") || "").toLowerCase();
+        if (patterns.some(pattern => text.includes(pattern))) {{
+          control.scrollIntoView({{block: "center"}});
+          control.click();
+          return {{clicked: true, text}};
+        }}
+      }}
+    }}
+    return {{clicked: false}};
+  }};
   const opened = clickByText(["reply", "відповісти", "написати"]);
   const textarea = Array.from(document.querySelectorAll("textarea")).filter(visible).pop();
   const editable = Array.from(document.querySelectorAll("[contenteditable=true]")).filter(visible).pop();
@@ -577,7 +598,7 @@ def prepare_or_send_thank_you(
   if (!executeSend) {{
     return {{ok: true, filled: true, sent: false, dry_run: true, opened, messageLength: message.length}};
   }}
-  const submitted = clickByText(["send", "відправити", "надіслати"]);
+  const submitted = clickNearTarget(target, ["send", "відправити", "надіслати", "відповісти"]);
   return {{ok: submitted.clicked, filled: true, sent: submitted.clicked, submitted, opened, messageLength: message.length}};
 }})()
 """
