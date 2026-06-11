@@ -8,6 +8,9 @@ Use this guide when installing the project on another local computer.
   or private resume contents unless the human explicitly approves it.
 - Do not click final submit/apply/send without row-level approval.
 - Do not upload a resume unless the human explicitly approves the exact resume.
+- Do not reject an inbound offer or change account/profile settings unless the
+  human explicitly requests that concrete action. The web UI profile-on button
+  counts as explicit approval for that one profile toggle attempt.
 - Keep generated runtime data in ignored folders: `data/job_waves/`,
   `data/private/`, `tmp/`.
 
@@ -41,6 +44,9 @@ Use this guide when installing the project on another local computer.
    - LinkedIn profile URL.
    - Whether existing selected Djinni resume may be used.
    - Which sites may be automated: Djinni only by default.
+   - Whether Djinni inbox offers may be scanned from the visible browser
+     session.
+   - Whether profile visibility may be toggled on from the Djinni inbox page.
 
 5. Fill `.env`:
 
@@ -97,3 +103,26 @@ python src\djinni_csv_apply.py --csv examples\approved_jobs_sample.csv
 ```
 
 Do not run `--execute` until the human has approved specific rows.
+
+## Djinni Inbox Workflow
+
+Use:
+
+```powershell
+python src\djinni_inbox_scan.py
+```
+
+This opens `https://djinni.co/my/inbox/` through Chrome CDP, extracts visible
+inbound offer cards/threads, scores them, and writes
+`data/job_waves/djinni_inbox_offers.jsonl`.
+
+To toggle the Djinni profile on, the human must explicitly request it or click
+the web UI button. CLI form:
+
+```powershell
+python src\djinni_inbox_scan.py --execute-profile-toggle --i-understand-this-changes-djinni-profile
+```
+
+Rows with `recommendation=reject_candidate` are recommendations only. Do not
+click rejection controls without a separate approved rejection workflow naming
+the exact thread URL.

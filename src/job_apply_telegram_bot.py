@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import argparse
 import csv
+import json
 import subprocess
 import sys
 import threading
@@ -13,6 +13,7 @@ from typing import Any
 
 import requests
 
+from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
 from resume_index import build_resume_index
 from vacancy_pipeline import build_candidate_batch, candidate_summary
@@ -66,16 +67,26 @@ class TelegramBot:
 
     def scan(self) -> Path:
         build_resume_index()
+        try:
+            scan_inbox()
+        except Exception as exc:
+            print(f"inbox scan skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return build_candidate_batch(limit=10)
 
     def format_batch(self, batch: Path) -> str:
         rows = candidate_summary(batch)
-        lines = ["Свіжі кандидати на подачу:", ""]
+        lines = ["Свіжі кандидати на подачу / review:", ""]
         for idx, row in enumerate(rows, 1):
-            lines.append(f"{idx}. {row.get('company')} — {row.get('title')}")
+            site = row.get("site") or ""
+            recommendation = row.get("recommendation") or ""
+            score = row.get("score") or ""
+            marker = "submit" if site == "djinni" else "review-only"
+            lines.append(f"{idx}. [{marker}] {row.get('company')} - {row.get('title')}")
+            if recommendation or score:
+                lines.append(f"   recommendation={recommendation} score={score}")
             lines.append(str(row.get("url")))
         lines.append("")
-        lines.append("Для підтвердження: /approve_latest")
+        lines.append("Для підтвердження вже approved Djinni рядків: /approve_latest")
         lines.append("Для нового пошуку: /scan")
         return "\n".join(lines)
 
@@ -86,7 +97,7 @@ class TelegramBot:
             return
         approved_count = count_approved_djinni_rows(Path(batch))
         if approved_count == 0:
-            self.send(chat_id, "Немає approved Djinni рядків у latest batch. Підтвердь рядки у web UI або CSV.")
+            self.send(chat_id, "Немає approved Djinni рядків у latest batch. Підтверди рядки у web UI або CSV.")
             return
         subprocess.Popen(
             [

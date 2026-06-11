@@ -10,12 +10,16 @@ gates than ChatGPT worker orchestration.
 - Open public vacancy URLs in an owner-visible Chrome session.
 - Capture accessibility snapshots for local review.
 - Stop when apply/send/submit language is visible.
+- Scan the visible Djinni inbox page for inbound offer summaries when requested.
+- Click a visible "turn on profile" style control only through the dedicated
+  `--execute-profile-toggle` gate or the matching web UI button.
 
 ## What It Must Not Do By Default
 
 - Click apply/send/submit.
 - Upload a resume.
 - Type or transmit phone, email, CV text, or cover-letter text into a site.
+- Reject inbound offers without a separate approval naming the exact thread.
 - Read Chrome profile files, cookies, passwords, or saved sessions directly.
 - Bypass login, CAPTCHA, paywall, rate limit, or anti-bot controls.
 
@@ -43,6 +47,18 @@ python src\job_site_browser_prep.py open-tabs-cdp --i-understand-no-submit
 
 The CDP HTTP flow only opens tabs and writes a local JSONL log. It has no
 click, type, upload, or submit implementation.
+
+Scan Djinni inbox offers:
+
+```powershell
+python src\djinni_inbox_scan.py
+```
+
+Turn on Djinni profile visibility from the inbox page:
+
+```powershell
+python src\djinni_inbox_scan.py --execute-profile-toggle --i-understand-this-changes-djinni-profile
+```
 
 If the owner is already logged in in the main Chrome profile and that window is
 not CDP-controlled, open URLs through Chrome's normal single-instance routing:

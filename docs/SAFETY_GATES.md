@@ -12,6 +12,8 @@ reputation. The default mode is conservative.
 - Draft cover letters locally.
 - Prepare a browser form up to, but not including, final submission.
 - Produce a review queue for the owner.
+- Read visible Djinni inbox offer summaries from an already logged-in,
+  owner-visible browser session when the owner has requested inbox scanning.
 
 ## Requires Explicit Owner Approval
 
@@ -22,6 +24,10 @@ Each concrete application requires approval that names:
 - resume/CV/profile file or account profile to use;
 - cover letter/message text;
 - whether to click the final submit/apply/send button.
+
+Changing account/profile visibility or rejecting an inbound offer also requires
+explicit approval naming the concrete action and target. A local UI button with
+the action name counts as approval for that one click.
 
 ## Never Do
 
@@ -45,3 +51,5 @@ Each concrete application requires approval that names:
 5. `review`: show queue and wait for owner decision.
 6. `prepare`: open site form and fill approved fields.
 7. `submit`: gated action only after explicit owner approval.
+8. `inbox`: scan visible Djinni inbox offers, score them, and add relevant or
+   review/reject-candidate rows to the daily review queue.

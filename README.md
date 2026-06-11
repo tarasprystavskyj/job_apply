@@ -54,12 +54,25 @@ http://127.0.0.1:8097/
 
 Use the UI:
 
-1. Click `Підібрати свіжі вакансії`.
+1. Click `Підібрати свіжі вакансії + Djinni inbox`.
 2. Review generated rows.
 3. Tick checkboxes for vacancies you approve.
 4. Click `Зберегти галочки` or `Підтвердити всі Djinni`.
 5. Click `Зробити розсилку approved CSV`.
 6. Watch the status and submission log tail on the page.
+
+The UI also has:
+
+- `Оновити тільки Djinni inbox`: scans `https://djinni.co/my/inbox/` in an
+  already logged-in, owner-visible Chrome session and writes inbound offers to
+  the local review queue.
+- `Увімкнути профіль Djinni`: clicks a visible Djinni profile-on control only
+  when such a control is detected on the inbox page.
+
+Inbound Djinni offers are added to the daily batch as `site=djinni_inbox`.
+They are review-only rows: the submitter will not send applications for them.
+Low-fit offers are marked `recommendation=reject_candidate` so the owner can
+review and approve a later rejection workflow.
 
 ## Telegram Bot
 
@@ -91,7 +104,9 @@ Commands:
 - `/approve_latest`
 
 The bot sends a daily scan around `JOB_APPLY_DAILY_HOUR` when running
-continuously. It still only submits rows already marked approved in the CSV.
+continuously. `/scan` first refreshes Djinni inbox offers when Chrome CDP is
+available, then builds the candidate batch. It still only submits rows already
+marked approved in the CSV.
 
 ## Djinni CSV Submitter
 
@@ -113,7 +128,8 @@ Required safety columns:
 - `final_submit_allowed=true`
 
 Rows for non-Djinni sites are ignored by the Djinni submitter and need separate
-site-specific flows.
+site-specific flows. `site=djinni_inbox` rows are also ignored by the submitter
+and are intended for review/reply/reject decisions only.
 
 ## Development Notes
 

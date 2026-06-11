@@ -9,6 +9,7 @@ Implemented entry points:
 - Resume index: `python src\resume_index.py`
 - Batch builder: `python src\vacancy_pipeline.py`
 - Djinni submitter: `python src\djinni_csv_apply.py`
+- Djinni inbox scanner: `python src\djinni_inbox_scan.py`
 
 The `.env` file contains local runtime settings:
 
@@ -23,6 +24,11 @@ The web UI currently builds a candidate CSV from local observed vacancies and
 shows proposed links. The submit button only sends rows already marked
 `approved_to_submit=true` and `final_submit_allowed=true`.
 
+The web UI can also scan `https://djinni.co/my/inbox/` through the visible
+Chrome CDP session. Inbound offers are stored in
+`data/job_waves/djinni_inbox_offers.jsonl` and then included in the daily batch
+as `site=djinni_inbox` review-only rows. The submitter ignores these rows.
+
 The Telegram bot follows the AIMA-style pattern:
 
 1. Daily scheduler checks at 10:00 local time.
@@ -30,6 +36,10 @@ The Telegram bot follows the AIMA-style pattern:
 3. It sends the list to Telegram.
 4. It waits for `/approve_latest`.
 5. It launches the existing CSV submitter for approved rows.
+
+During `/scan` and the daily scheduler, the bot attempts a Djinni inbox scan
+first. If Chrome CDP is unavailable, it logs the inbox scan failure and still
+builds the batch from existing observations.
 
 Resume indexing reads PDF/text/markdown files from `JOB_APPLY_RESUME_DIR` and
 writes private excerpts to `data/private/resume_index.json`, which is ignored by

@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
 from resume_index import build_resume_index
 from vacancy_pipeline import build_candidate_batch, candidate_summary
@@ -82,6 +83,24 @@ def log_tail(path: Path, limit: int = 12) -> list[dict]:
     return rows
 
 
+def scan_inbox_status(execute_profile_toggle: bool = False) -> str:
+    try:
+        result = scan_inbox(execute_profile_toggle=execute_profile_toggle)
+    except Exception as exc:
+        return f"inbox scan failed: {type(exc).__name__}: {exc}"
+    profile = result.get("profile") or {}
+    profile_text = ""
+    if profile.get("clicked"):
+        profile_text = "; Djinni profile toggle clicked"
+    elif profile.get("found"):
+        profile_text = "; Djinni profile toggle available but not clicked"
+    return (
+        f"inbox offers: {result.get('offers_found', 0)} "
+        f"(digest={result.get('digest', 0)}, review={result.get('review', 0)}, "
+        f"reject_candidate={result.get('reject_candidate', 0)}){profile_text}"
+    )
+
+
 def render_page() -> str:
     state = load_state()
     batch = Path(state["latest_batch"]) if state.get("latest_batch") else None
@@ -93,7 +112,7 @@ def render_page() -> str:
         checkbox = (
             f"<input type='checkbox' name='row' value='{idx}' {'checked' if approved else ''}>"
             if supported
-            else "<span class='muted'>unsupported</span>"
+            else "<span class='muted'>review only</span>"
         )
         row_html.append(
             "<tr>"
@@ -102,10 +121,12 @@ def render_page() -> str:
             f"<td>{html.escape(row.get('title', ''))}</td>"
             f"<td><a href='{html.escape(row.get('url', ''))}' target='_blank'>open</a></td>"
             f"<td>{html.escape(row.get('site', ''))}</td>"
+            f"<td>{html.escape(row.get('recommendation', ''))}</td>"
+            f"<td>{html.escape(row.get('score', ''))}</td>"
             f"<td>{'yes' if approved else 'no'}</td>"
             "</tr>"
         )
-    rows_html = "\n".join(row_html) or "<tr><td colspan='6'>No batch yet.</td></tr>"
+    rows_html = "\n".join(row_html) or "<tr><td colspan='8'>No batch yet.</td></tr>"
 
     log_rows = []
     for item in log_tail(SUBMISSION_LOG):
@@ -154,7 +175,9 @@ def render_page() -> str:
   </header>
 
   <form class="bar" method="post" action="/scan">
-    <button class="primary" type="submit">Підібрати свіжі вакансії</button>
+    <button class="primary" type="submit">Підібрати свіжі вакансії + Djinni inbox</button>
+    <button type="submit" formaction="/scan-inbox">Оновити тільки Djinni inbox</button>
+    <button type="submit" formaction="/profile-on">Увімкнути профіль Djinni</button>
   </form>
 
   <form class="bar" method="post" action="/bot-note">
@@ -175,7 +198,7 @@ def render_page() -> str:
       <button type="submit" formaction="/send" class="primary">Зробити розсилку approved CSV</button>
     </div>
     <table>
-      <thead><tr><th>OK</th><th>Company</th><th>Title</th><th>URL</th><th>Site</th><th>Approved</th></tr></thead>
+      <thead><tr><th>OK</th><th>Company</th><th>Title</th><th>URL</th><th>Site</th><th>Recommendation</th><th>Score</th><th>Approved</th></tr></thead>
       <tbody>{rows_html}</tbody>
     </table>
   </form>
@@ -203,10 +226,23 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace")) if length else {}
         if path == "/scan":
             build_resume_index()
+            inbox_note = scan_inbox_status(execute_profile_toggle=False)
             batch = build_candidate_batch(limit=10)
             state = load_state()
             state["latest_batch"] = str(batch)
-            state["status"] = f"built batch: {batch}"
+            state["status"] = f"built batch: {batch}; {inbox_note}"
+            save_state(state)
+            self.redirect("/")
+            return
+        if path == "/scan-inbox":
+            state = load_state()
+            state["status"] = scan_inbox_status(execute_profile_toggle=False)
+            save_state(state)
+            self.redirect("/")
+            return
+        if path == "/profile-on":
+            state = load_state()
+            state["status"] = scan_inbox_status(execute_profile_toggle=True)
             save_state(state)
             self.redirect("/")
             return
@@ -218,14 +254,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/approve-all":
                 changed, skipped = update_batch_approvals(batch, approve_all=True)
-                state["status"] = f"approved all supported Djinni rows: {changed}; skipped unsupported: {skipped}"
+                state["status"] = f"approved all supported Djinni rows: {changed}; skipped review-only rows: {skipped}"
             elif path == "/clear-approvals":
                 changed, skipped = update_batch_approvals(batch, selected=set())
-                state["status"] = f"cleared approvals; unsupported rows skipped: {skipped}"
+                state["status"] = f"cleared approvals; review-only rows skipped: {skipped}"
             else:
                 selected = {int(v) for v in form.get("row", []) if str(v).isdigit()}
                 changed, skipped = update_batch_approvals(batch, selected=selected)
-                state["status"] = f"saved selected approvals: {changed}; skipped unsupported: {skipped}"
+                state["status"] = f"saved selected approvals: {changed}; review-only rows skipped: {skipped}"
             save_state(state)
             self.redirect("/")
             return
