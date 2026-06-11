@@ -71,6 +71,22 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
         self.assertEqual(message, "")
         self.assertIn("scheduling", reason)
 
+    def test_site_salary_warning_does_not_block_plain_cv_request(self) -> None:
+        link = "https://drive.google.com/file/d/example/view?usp=sharing"
+        confidence, intent, message, _reason = plan_auto_reply(
+            status="review",
+            body="Djinni page warning: profile salary is $5000 while application expectation is $3000.",
+            recruiter_message="Hi Taras, Could you share your CV, please? Thank you, Irina",
+            company="Seeking Alpha",
+            role="Senior Python AI Engineer",
+            recruiter_name="Iryna",
+            public_resume_links=[link],
+        )
+
+        self.assertGreaterEqual(confidence, 0.8)
+        self.assertEqual(intent, "send_public_resume_link")
+        self.assertIn(link, message)
+
     def test_inbox_thread_urls_are_loaded_from_offer_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "offers.jsonl"

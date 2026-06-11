@@ -257,6 +257,7 @@ def plan_auto_reply(
     public_resume_links: list[str],
 ) -> tuple[float, str, str, str]:
     text = " ".join([body, recruiter_message])
+    recruiter_only = recruiter_message or body
     if status == "rejected":
         return (
             0.92,
@@ -264,7 +265,7 @@ def plan_auto_reply(
             draft_thank_you_reply(company=company, role=role, recruiter_name=recruiter_name),
             "clear rejection; low-risk polite thank-you reply",
         )
-    if asks_for_resume_link(text) and public_resume_links and not needs_manual_reply(text):
+    if asks_for_resume_link(recruiter_only) and public_resume_links and not needs_manual_reply(recruiter_only):
         return (
             0.86,
             "send_public_resume_link",
