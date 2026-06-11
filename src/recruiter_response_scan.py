@@ -328,6 +328,7 @@ def plan_auto_reply(
 
 
 def extract_recruiter_message(body: str) -> str:
+    tail = body[-1200:]
     markers = [
         "Thanks for your interest.",
         "At this moment",
@@ -336,10 +337,10 @@ def extract_recruiter_message(body: str) -> str:
     ]
     latest_idx = -1
     for marker in markers:
-        latest_idx = max(latest_idx, body.rfind(marker))
+        latest_idx = max(latest_idx, tail.rfind(marker))
     if latest_idx >= 0:
-        return body[latest_idx : latest_idx + 600]
-    return body[-600:]
+        return tail[latest_idx:]
+    return tail
 
 
 def evidence_excerpt(body: str) -> str:

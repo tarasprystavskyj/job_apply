@@ -15,6 +15,7 @@ from recruiter_response_scan import (  # noqa: E402
     RecruiterResponse,
     already_auto_replied,
     classify_status,
+    extract_recruiter_message,
     inbox_thread_urls,
     is_djinni_thread_url,
     latest_response_summary,
@@ -112,6 +113,30 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
     def test_status_is_classified_from_recruiter_message_only(self) -> None:
         self.assertEqual(classify_status("Could we schedule a call tomorrow?"), "positive_or_action_needed")
         self.assertEqual(classify_status("Unfortunately, we cannot move forward."), "rejected")
+
+    def test_later_action_text_after_rejection_marker_stays_in_recruiter_message(self) -> None:
+        body = (
+            "Earlier conversation. Unfortunately, we cannot move forward for this role. "
+            "Some intermediate page text. "
+            "Could we schedule a call about another opportunity and discuss salary?"
+        )
+        message = extract_recruiter_message(body)
+        status = classify_status(message)
+        confidence, intent, auto_message, reason = plan_auto_reply(
+            status=status,
+            body=body,
+            recruiter_message=message,
+            company="Example",
+            role="AI Engineer",
+            recruiter_name="",
+            public_resume_links=[],
+        )
+
+        self.assertIn("schedule a call", message)
+        self.assertLess(confidence, 0.8)
+        self.assertEqual(intent, "manual_rejection_with_action_needed")
+        self.assertEqual(auto_message, "")
+        self.assertIn("manual-review", reason)
 
     def test_site_salary_warning_does_not_block_plain_cv_request(self) -> None:
         link = "https://drive.google.com/file/d/example/view?usp=sharing"
