@@ -13,6 +13,7 @@ from job_platforms import ApprovalGate, DiscoveryQuery, default_registry  # noqa
 from job_platforms.base import UnsupportedAction  # noqa: E402
 from job_platforms.dou import DouAdapter, build_dou_progress_snapshot, build_dou_review_drafts, score_dou_observation  # noqa: E402
 from job_platforms.platforms import DouAdapter as PlatformsDouAdapter  # noqa: E402
+from dou_pipeline import run_once as run_dou_once  # noqa: E402
 from shared_job_db import fetch_progress_rows  # noqa: E402
 
 
@@ -135,6 +136,61 @@ class DouAdapterTest(unittest.TestCase):
             self.assertEqual(status_by_id["draft"], "complete")
             self.assertEqual(status_by_id["review_approval"], "blocked_waiting_owner")
             self.assertEqual(status_by_id["final_gated_apply"], "blocked_waiting_owner")
+
+    def test_run_once_fetches_public_pages_and_writes_review_artifacts(self) -> None:
+        fetched: list[str] = []
+
+        def fake_fetch(url: str, timeout: int) -> str:
+            fetched.append(url)
+            return PUBLIC_DOU_HTML
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            summary = run_dou_once(
+                "Python AI",
+                limit=1,
+                max_pages=1,
+                db_path=base / "jobs.sqlite3",
+                observations_path=base / "observations.jsonl",
+                progress_path=base / "progress.json",
+                summary_path=base / "summary.json",
+                blockers_path=base / "blockers.json",
+                fetch_text=fake_fetch,
+            )
+
+            self.assertEqual(fetched, ["https://jobs.dou.ua/vacancies/?search=Python+AI"])
+            self.assertEqual(summary["observations"], 1)
+            self.assertFalse(summary["safety"]["submission_allowed"])
+            self.assertFalse(summary["safety"]["upload_allowed"])
+
+            observations = (base / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(observations), 1)
+            progress = (base / "progress.json").read_text(encoding="utf-8")
+            self.assertIn("final_gated_apply", progress)
+            blockers = (base / "blockers.json").read_text(encoding="utf-8")
+            self.assertIn("submit/apply/send", blockers)
+
+            rows = fetch_progress_rows(base / "jobs.sqlite3")
+            self.assertEqual(len(rows["jobs"]), 1)
+            self.assertEqual(len(rows["outreach"]), 1)
+            self.assertFalse(bool(rows["outreach"][0]["submission_allowed"]))
+
+    def test_run_once_refuses_non_dou_urls_before_fetch(self) -> None:
+        def fake_fetch(url: str, timeout: int) -> str:
+            raise AssertionError("non-DOU URL should not be fetched")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                run_dou_once(
+                    "Python AI",
+                    urls=["https://example.com/jobs"],
+                    db_path=Path(tmp) / "jobs.sqlite3",
+                    observations_path=Path(tmp) / "observations.jsonl",
+                    progress_path=Path(tmp) / "progress.json",
+                    summary_path=Path(tmp) / "summary.json",
+                    blockers_path=Path(tmp) / "blockers.json",
+                    fetch_text=fake_fetch,
+                )
 
 
 if __name__ == "__main__":
