@@ -6,7 +6,9 @@ This script attaches to an already-running Chrome with remote debugging enabled
 and uses only visible Djinni application forms. It does not read cookies,
 browser profile files, saved passwords, or local CV files.
 
-Default mode is dry-run. Real submission requires both:
+Default mode is dry-run. Rows must carry the same explicit structured gate
+data in dry-run and execute mode. Real submission additionally requires CLI
+execute flags:
 
 - CSV row: approved_to_submit=true and final_submit_allowed=true
 - CLI flags: --execute --i-understand-this-submits-applications
@@ -64,16 +66,8 @@ def require_columns(row: dict[str, str], row_number: int, columns: list[str]) ->
 def load_message(row: dict[str, str], csv_path: Path) -> str:
     message = (row.get("message") or "").strip()
     message_file = (row.get("message_file") or "").strip()
-    if message and message_file:
-        raise ValueError("Use either message or message_file, not both.")
     if message_file:
-        path = Path(message_file)
-        if not path.is_absolute():
-            path = csv_path.parent / path
-        resolved = path.resolve()
-        if ROOT not in resolved.parents and resolved != ROOT:
-            raise ValueError(f"message_file must stay inside workspace: {resolved}")
-        return resolved.read_text(encoding="utf-8").strip()
+        raise ValueError("message_file is not allowed; put the exact approved message in the CSV row.")
     return message
 
 
@@ -131,16 +125,18 @@ def validate_row(row: ApplicationRow, execute: bool) -> list[str]:
         errors.append("salary_usd must be a number")
     elif not (1 <= int(row.salary_usd) <= 100000):
         errors.append("salary_usd is outside a sane range")
-    if row.linkedin and not row.linkedin.startswith("https://www.linkedin.com/in/"):
+    if not row.linkedin:
+        errors.append("linkedin is required")
+    elif not row.linkedin.startswith("https://www.linkedin.com/in/"):
         errors.append("linkedin must be a public LinkedIn profile URL")
     if row.resume_policy not in {"no_resume", "use_selected_resume"}:
         errors.append("resume_policy must be no_resume or use_selected_resume")
     if row.resume_policy == "use_selected_resume" and not row.approved_resume_name:
         errors.append("approved_resume_name is required when resume_policy=use_selected_resume")
-    if execute and not row.approved_to_submit:
-        errors.append("approved_to_submit must be true for execute")
-    if execute and not row.final_submit_allowed:
-        errors.append("final_submit_allowed must be true for execute")
+    if not row.approved_to_submit:
+        errors.append("approved_to_submit must be true")
+    if not row.final_submit_allowed:
+        errors.append("final_submit_allowed must be true")
     return errors
 
 

@@ -186,8 +186,11 @@ Dry-run:
 python src\djinni_csv_apply.py --csv examples\approved_jobs_sample.csv
 ```
 
-The sample CSV contains a placeholder Djinni-shaped URL only for dry-run schema
-validation. Replace it with a real approved vacancy before any execute run.
+The sample CSV contains a placeholder Djinni-shaped URL with approval gates set
+to `false`, so dry-run should block it. A live-batch dry-run should use rows
+that already contain the exact approved message, salary, LinkedIn URL,
+resume-policy choice, `approved_to_submit=true`, and
+`final_submit_allowed=true`.
 
 Real submit:
 
@@ -197,6 +200,12 @@ python src\djinni_csv_apply.py --csv path\to\approved.csv --execute --i-understa
 
 Required safety columns:
 
+- `site=djinni`
+- `url=https://djinni.co/jobs/...`
+- exact `message` in the CSV row
+- `salary_usd`
+- `linkedin`
+- `resume_policy`
 - `approved_to_submit=true`
 - `final_submit_allowed=true`
 
