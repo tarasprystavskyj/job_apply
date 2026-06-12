@@ -3,27 +3,214 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from blocker_loop import refresh_unresolved_blockers
 from djinni_inbox_scan import scan_inbox
+from dou_pipeline import DEFAULT_OBSERVATIONS_PATH as DOU_OBSERVATIONS_PATH
+from dou_pipeline import run_once as run_dou_once
+from function_graph import function_graph
 from job_apply_config import ROOT, settings
+from job_scan_sources import SUMMARY_PATH as ALL_SOURCES_SUMMARY_PATH
+from job_scan_sources import format_scan_summary, run_all_sources_scan
+from job_platforms.dou import is_dou_listing_url
 from job_platforms.progress import build_progress_snapshot
+from recruiter_response_scan import is_djinni_thread_url
 from resume_index import build_resume_index
-from vacancy_pipeline import build_candidate_batch, candidate_summary
+from vacancy_pipeline import OBSERVATION_PATHS, build_candidate_batch, candidate_summary
 
 
 STATE_PATH = ROOT / "data" / "job_waves" / "web_state.json"
-SUBMISSION_LOG = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
+WEB_RUNS_DIR = ROOT / "data" / "job_waves" / "web_runs"
+SUBMISSION_LOGS = {
+    "djinni": ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl",
+    "workua": ROOT / "data" / "job_waves" / "workua_submission_attempts.jsonl",
+    "dou": ROOT / "data" / "job_waves" / "dou_submission_attempts.jsonl",
+    "robotaua": ROOT / "data" / "job_waves" / "robotaua_submission_attempts.jsonl",
+}
+SITE_LABELS = {
+    "djinni": "Djinni",
+    "workua": "Work.ua",
+    "dou": "DOU",
+    "robotaua": "Robota.ua",
+}
+ACTIONABLE_SITE_NAMES = set(SITE_LABELS)
+REVIEW_FLOW_NAMES = {"djinniinbox"}
+EXTRA_LIVE_COLUMNS = [
+    "linkedin_policy",
+    "message_policy",
+    "profile_resume_only_allowed",
+    "upload_allowed",
+    "approved_resume_path",
+    *[f"answer_{idx}" for idx in range(1, 9)],
+]
+BUTTON_HINTS = {
+    "en": {
+        "scan": "Scan fresh vacancies from configured sources, refresh Djinni inbox offers, rebuild the candidate batch, and do not send applications.",
+        "scan_inbox": "Refresh only Djinni inbox offers and recruiter threads; no applications or replies are sent.",
+        "profile_on": "Open Djinni profile controls and try to enable the candidate profile. This changes account visibility when the site allows it.",
+        "bot_note": "Write the latest batch/status summary for the Telegram bot notification flow; it does not submit applications.",
+        "progress": "Open the platform progress dashboard with agent branch/readiness status.",
+        "sent": "Open the table of vacancies where an application was sent successfully or confirmed by post-submit evidence.",
+        "save_selected": "Save only the checked rows as approved and clear approval from unchecked or blocked rows.",
+        "approve_all": "Approve every currently supported application row and every review/reply row visible in this batch.",
+        "clear_all": "Clear all row approvals in the current batch.",
+        "dry_run": "Run each site adapter in validation-only mode and append logs; no browser submit button is clicked.",
+        "prepare": "Open/fill/pre-validate approved application forms where supported, then stop before the final submit/send click.",
+        "send": "Run the final send path for approved rows only. Site adapters still enforce their CSV approval gates.",
+    },
+    "uk": {
+        "scan": "Знайти свіжі вакансії з налаштованих джерел, оновити Djinni inbox, зібрати новий список кандидатів і нічого не відправляти.",
+        "scan_inbox": "Оновити лише пропозиції та переписки в Djinni inbox; заявки і відповіді не надсилаються.",
+        "profile_on": "Відкрити керування профілем Djinni і спробувати увімкнути профіль кандидата. Це змінює видимість акаунта, якщо сайт дозволяє.",
+        "bot_note": "Записати поточний статус і список для Telegram bot flow; заявки не надсилаються.",
+        "progress": "Відкрити сторінку прогресу платформ і готовності агентів.",
+        "sent": "Відкрити таблицю вакансій, куди заявка була успішно надіслана або підтверджена після submit.",
+        "save_selected": "Зберегти лише відмічені рядки як підтверджені і зняти підтвердження з інших або заблокованих рядків.",
+        "approve_all": "Підтвердити всі поточно підтримані рядки заявок і всі review/reply рядки в цьому списку.",
+        "clear_all": "Зняти всі підтвердження у поточному списку.",
+        "dry_run": "Запустити адаптери сайтів у режимі перевірки і записати логи; фінальна кнопка submit у браузері не натискається.",
+        "prepare": "Відкрити, заповнити і перевірити підтверджені форми, але зупинитись перед фінальним кліком submit/send.",
+        "send": "Запустити фінальну відправку лише для підтверджених рядків. Адаптери сайтів все одно перевіряють approval gates у CSV.",
+    },
+}
+TEXT = {
+    "en": {
+        "app_title": "Job Apply Automation",
+        "language": "Language",
+        "agent_model": "Agent model",
+        "locations": "locations",
+        "latest_batch": "latest batch",
+        "scan": "Scan all sources + build batch",
+        "scan_inbox": "Refresh only Djinni inbox",
+        "profile_on": "Enable Djinni profile",
+        "bot_note": "Prepare Telegram bot status",
+        "progress": "Platform progress graph",
+        "function_graph": "Function map",
+        "sent_page": "Sent applications",
+        "status": "Status",
+        "site_counts": "Site counts",
+        "last_run_jobs": "Last run jobs",
+        "save_selected": "Save selected",
+        "approve_all": "Approve all supported + review rows",
+        "clear_all": "Clear all",
+        "dry_run": "Run validation dry-run",
+        "prepare": "Prepare / pre-submit",
+        "send": "Final send approved",
+        "ok": "OK",
+        "company": "Company",
+        "title": "Title",
+        "url": "URL",
+        "site": "Site",
+        "supported": "Supported",
+        "blocker": "Blocker",
+        "recommendation": "Recommendation",
+        "score": "Score",
+        "approved": "Approved",
+        "yes": "yes",
+        "no": "no",
+        "blocked": "blocked",
+        "no_batch": "No batch yet.",
+        "submission_log": "Submission Log Tail",
+        "time": "Time",
+        "result": "Result",
+        "blocked_reason": "Blocked reason",
+        "no_log": "No submission log yet.",
+        "sent_title": "Sent Applications",
+        "sent_empty": "No sent applications found yet.",
+        "back": "Back",
+    },
+    "uk": {
+        "app_title": "Автоматизація подачі заявок",
+        "language": "Мова",
+        "agent_model": "Модель агента",
+        "locations": "локації",
+        "latest_batch": "останній список",
+        "scan": "Підібрати свіжі вакансії + Djinni inbox",
+        "scan_inbox": "Оновити тільки Djinni inbox",
+        "profile_on": "Увімкнути профіль Djinni",
+        "bot_note": "Підготувати статус Telegram bot",
+        "progress": "Граф прогресу платформ",
+        "sent_page": "Надіслані заявки",
+        "status": "Статус",
+        "site_counts": "Лічильники сайтів",
+        "last_run_jobs": "Останні запущені задачі",
+        "save_selected": "Зберегти вибрані",
+        "approve_all": "Підтвердити всі supported + review",
+        "clear_all": "Зняти всі",
+        "dry_run": "Запустити dry-run перевірку",
+        "prepare": "Підготувати / pre-submit",
+        "send": "Фінально надіслати підтверджені",
+        "ok": "OK",
+        "company": "Компанія",
+        "title": "Назва",
+        "url": "URL",
+        "site": "Сайт",
+        "supported": "Supported",
+        "blocker": "Блокер",
+        "recommendation": "Рекомендація",
+        "score": "Оцінка",
+        "approved": "Підтверджено",
+        "yes": "так",
+        "no": "ні",
+        "blocked": "заблоковано",
+        "no_batch": "Списку ще немає.",
+        "submission_log": "Останні логи розсилки",
+        "time": "Час",
+        "result": "Результат",
+        "blocked_reason": "Причина блокування",
+        "no_log": "Логів розсилки ще немає.",
+        "sent_title": "Надіслані заявки",
+        "sent_empty": "Надісланих заявок ще не знайдено.",
+        "back": "Назад",
+    },
+}
+TEXT["uk"].update(
+    {
+        "scan": "Сканувати всі джерела + зібрати список",
+        "function_graph": "Карта функціоналу",
+    }
+)
+BUTTON_HINTS["uk"]["scan"] = (
+    "Оновити всі налаштовані джерела: Djinni inbox, відповіді рекрутерів, DOU, Work.ua, Robota.ua; "
+    "після цього зібрати новий CSV для перегляду і нічого не відправляти."
+)
 
 
 def load_state() -> dict:
+    state = {"latest_batch": "", "status": "idle"}
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    return {"latest_batch": "", "status": "idle"}
+        state.update(json.loads(STATE_PATH.read_text(encoding="utf-8-sig")))
+    return sync_state_with_scan_summary(state)
+
+
+def sync_state_with_scan_summary(state: dict) -> dict:
+    if not ALL_SOURCES_SUMMARY_PATH.exists():
+        return state
+    try:
+        summary = json.loads(ALL_SOURCES_SUMMARY_PATH.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return state
+    batch_text = str(summary.get("batch") or "")
+    if not batch_text:
+        return state
+    batch = Path(batch_text)
+    if not batch.exists():
+        return state
+    current_text = str(state.get("latest_batch") or "")
+    current = Path(current_text) if current_text else None
+    if current and current.exists() and current.stat().st_mtime >= batch.stat().st_mtime:
+        return state
+    synced = dict(state)
+    synced["latest_batch"] = str(batch)
+    synced["status"] = format_scan_summary(summary)
+    return synced
 
 
 def save_state(state: dict) -> None:
@@ -31,26 +218,214 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def normalized_site(row: dict[str, str]) -> str:
+    site = (row.get("site") or "").strip().lower().replace("-", "").replace("_", "").replace(".", "")
+    if site == "djinniinbox":
+        return site
+    if site in {"djinni", "workua", "dou", "robotaua"}:
+        return site
+    if site in {"robotaua", "robotau"}:
+        return "robotaua"
+    url = (row.get("url") or "").strip()
+    host = (urlparse(url).hostname or "").lower()
+    if host.endswith("djinni.co"):
+        return "djinni"
+    if host.endswith("work.ua"):
+        return "workua"
+    if host.endswith("dou.ua"):
+        return "dou"
+    if host.endswith("robota.ua"):
+        return "robotaua"
+    return site
+
+
+def is_djinni_job_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() == "djinni.co" and parsed.path.startswith("/jobs/")
+
+
+def is_workua_job_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and host in {"work.ua", "www.work.ua"} and bool(re.search(r"^/jobs/\d+/?$", parsed.path))
+
+
+def is_exact_dou_job_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and host in {"dou.ua", "jobs.dou.ua", "relocate.dou.ua"} and bool(
+        re.search(r"/vacancies/\d+/?$", parsed.path)
+    )
+
+
+def is_robotaua_job_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and host in {"robota.ua", "www.robota.ua"} and bool(re.search(r"/vacancy\d+", parsed.path, re.I))
+
+
+def supported_submit_site(row: dict[str, str]) -> str:
+    site = normalized_site(row)
+    url = (row.get("url") or "").strip()
+    if site == "djinni" and is_djinni_job_url(url):
+        return "djinni"
+    if site == "workua" and is_workua_job_url(url):
+        return "workua"
+    if site == "dou" and is_exact_dou_job_url(url):
+        return "dou"
+    if site == "robotaua" and is_robotaua_job_url(url):
+        return "robotaua"
+    return ""
+
+
+def submit_blocker(row: dict[str, str]) -> str:
+    if supported_submit_site(row):
+        return ""
+    site = normalized_site(row)
+    url = (row.get("url") or "").strip()
+    if site == "djinniinbox":
+        return "Use Djinni inbox review/reply flow"
+    if site == "dou" and "dou.ua" in url:
+        return "DOU requires exact vacancy URL ending /vacancies/<id>/"
+    if site == "workua":
+        return "Work.ua requires exact public URL like https://www.work.ua/jobs/<id>/"
+    if site == "robotaua":
+        return "Robota.ua requires exact public URL containing /vacancy<id>"
+    if site == "djinni":
+        return "Djinni requires exact public job URL"
+    return "review only"
+
+
+def is_review_send_row(row: dict[str, str]) -> bool:
+    return normalized_site(row) == "djinniinbox" and is_djinni_thread_url((row.get("url") or "").strip())
+
+
+def is_actionable_row(row: dict[str, str]) -> bool:
+    return bool(supported_submit_site(row)) or is_review_send_row(row)
+
+
 def is_supported_submit_row(row: dict[str, str]) -> bool:
-    return (row.get("site") or "").strip().lower() == "djinni" and (row.get("url") or "").startswith("https://djinni.co/jobs/")
+    return bool(supported_submit_site(row))
+
+
+def supported_label(row: dict[str, str]) -> str:
+    site = supported_submit_site(row)
+    if site:
+        return SITE_LABELS[site]
+    if normalized_site(row) == "djinniinbox":
+        return "Djinni inbox"
+    return "no"
+
+
+def tooltip_attrs(text: str) -> str:
+    escaped = html.escape(text, quote=True)
+    return f'title="{escaped}" aria-label="{escaped}"'
+
+
+def normalize_lang(lang: str | None) -> str:
+    return "uk" if (lang or "").strip().lower() == "uk" else "en"
+
+
+def text_for(lang: str, key: str) -> str:
+    lang = normalize_lang(lang)
+    return TEXT[lang].get(key, TEXT["en"].get(key, key))
+
+
+def hint_for(lang: str, key: str) -> str:
+    lang = normalize_lang(lang)
+    return BUTTON_HINTS[lang].get(key, BUTTON_HINTS["en"].get(key, key))
+
+
+def url_with_lang(path: str, lang: str) -> str:
+    return f"{path}?lang={normalize_lang(lang)}"
+
+
+def lang_from_request(path: str) -> str:
+    query = parse_qs(urlparse(path).query)
+    return normalize_lang((query.get("lang") or ["en"])[0])
+
+
+def supported_cell_html(row: dict[str, str], lang: str = "en") -> str:
+    site = supported_submit_site(row)
+    if site:
+        label = SITE_LABELS.get(site, site)
+        return f"<span class='supported-check' {tooltip_attrs(label + ' final submit adapter is supported')}>&#10003;</span>"
+    if is_review_send_row(row):
+        return f"<span class='review-flow' {tooltip_attrs('Djinni inbox review/reply flow is supported')}>&#8635;</span>"
+    return f"<span class='muted' {tooltip_attrs(submit_blocker(row))}>{html.escape(text_for(lang, 'no'))}</span>"
+
+
+def ensure_live_fields(fields: list[str]) -> list[str]:
+    result = list(fields)
+    for field in EXTRA_LIVE_COLUMNS:
+        if field not in result:
+            result.append(field)
+    return result
+
+
+def normalize_row_for_site(row: dict[str, str], site: str, approve: bool = True) -> dict[str, str]:
+    normalized = dict(row)
+    normalized["site"] = site
+    normalized["message_file"] = ""
+    normalized["approved_to_submit"] = "true" if approve else "false"
+    normalized["final_submit_allowed"] = "true" if approve else "false"
+    normalized.setdefault("approved_resume_path", "")
+    if not has_exact_upload_gate(row, site):
+        normalized["upload_allowed"] = "false"
+        normalized["approved_resume_name"] = ""
+        normalized["approved_resume_path"] = ""
+        normalized["resume_policy"] = "no_resume"
+    normalized.setdefault("salary_usd", "3000")
+    linkedin = (normalized.get("linkedin") or "").strip()
+
+    if site == "workua":
+        normalized["linkedin_policy"] = "fill_field" if linkedin else "no_linkedin"
+    elif site == "dou":
+        normalized["linkedin_policy"] = "fill_url" if linkedin else "omit"
+    elif site == "robotaua":
+        normalized["linkedin_policy"] = "include_linkedin" if linkedin else "omit_linkedin"
+        if not linkedin:
+            normalized["linkedin"] = ""
+    else:
+        normalized["linkedin_policy"] = normalized.get("linkedin_policy", "")
+
+    for idx in range(1, 9):
+        normalized.setdefault(f"answer_{idx}", "")
+    return normalized
+
+
+def has_exact_upload_gate(row: dict[str, str], site: str) -> bool:
+    if site != "robotaua":
+        return False
+    return (
+        (row.get("resume_policy") or "").strip().lower() == "upload_exact_resume"
+        and (row.get("upload_allowed") or "").strip().lower() in {"1", "true", "yes", "y", "allowed", "approve", "approved"}
+        and bool((row.get("approved_resume_name") or "").strip())
+        and bool((row.get("approved_resume_path") or row.get("resume_path") or "").strip())
+    )
 
 
 def update_batch_approvals(batch: Path, selected: set[int] | None = None, approve_all: bool = False) -> tuple[int, int]:
     with batch.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
-        fields = list(reader.fieldnames or [])
+        fields = ensure_live_fields(list(reader.fieldnames or []))
         rows = list(reader)
     changed = 0
     skipped = 0
     for idx, row in enumerate(rows):
-        if not is_supported_submit_row(row):
+        if not is_actionable_row(row):
             row["approved_to_submit"] = "false"
             row["final_submit_allowed"] = "false"
             skipped += 1
             continue
         should_approve = approve_all or (selected is not None and idx in selected)
-        row["approved_to_submit"] = "true" if should_approve else "false"
-        row["final_submit_allowed"] = "true" if should_approve else "false"
+        site = supported_submit_site(row)
+        if site:
+            row.update(normalize_row_for_site(row, site, approve=should_approve))
+        else:
+            row["message_file"] = ""
+            row["approved_to_submit"] = "true" if should_approve else "false"
+            row["final_submit_allowed"] = "true" if should_approve else "false"
         if should_approve:
             changed += 1
     with batch.open("w", encoding="utf-8", newline="") as f:
@@ -66,10 +441,224 @@ def count_approved_rows(batch: Path) -> int:
     return sum(
         1
         for row in rows
-        if is_supported_submit_row(row)
+        if is_actionable_row(row)
         and row.get("approved_to_submit") == "true"
         and row.get("final_submit_allowed") == "true"
     )
+
+
+def approved_rows_by_site(batch: Path) -> dict[str, list[dict[str, str]]]:
+    with batch.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    grouped = {site: [] for site in ACTIONABLE_SITE_NAMES}
+    for row in rows:
+        site = supported_submit_site(row)
+        if not site:
+            continue
+        if row.get("approved_to_submit") == "true" and row.get("final_submit_allowed") == "true":
+            grouped[site].append(normalize_row_for_site(row, site, approve=True))
+    return grouped
+
+
+def approved_review_rows(batch: Path) -> list[dict[str, str]]:
+    with batch.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    result = []
+    for row in rows:
+        if not is_review_send_row(row):
+            continue
+        if row.get("approved_to_submit") == "true" and row.get("final_submit_allowed") == "true":
+            result.append(dict(row))
+    return result
+
+
+def write_site_csv(site: str, rows: list[dict[str, str]], mode: str) -> Path:
+    WEB_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    csv_path = WEB_RUNS_DIR / f"{site}_{mode}_{stamp}.csv"
+    fieldnames = ensure_live_fields(
+        [
+            "site",
+            "url",
+            "title",
+            "company",
+            "message",
+            "message_file",
+            "salary_usd",
+            "linkedin",
+            "linkedin_policy",
+            "resume_policy",
+            "approved_resume_name",
+            "upload_allowed",
+            "approved_to_submit",
+            "final_submit_allowed",
+            "source_type",
+            "recommendation",
+            "score",
+            "reason",
+        ]
+    )
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return csv_path
+
+
+def command_for_site(site: str, csv_path: Path, mode: str, log_path: Path) -> list[str]:
+    script_by_site = {
+        "djinni": ROOT / "src" / "djinni_csv_apply.py",
+        "workua": ROOT / "src" / "workua_csv_apply.py",
+        "dou": ROOT / "src" / "dou_csv_apply.py",
+        "robotaua": ROOT / "src" / "robotaua_csv_apply.py",
+    }
+    cmd = [sys.executable, str(script_by_site[site]), "--csv", str(csv_path), "--log", str(log_path)]
+    if mode == "dry-run":
+        return cmd
+    if mode == "prepare":
+        if site == "djinni":
+            return cmd
+        if site == "workua":
+            return [*cmd, "--prepare-browser", "--i-understand-this-prepares-workua-application"]
+        if site == "dou":
+            return [*cmd, "--prepare", "--i-understand-this-fills-dou-form"]
+        if site == "robotaua":
+            return [*cmd, "--pre-submit", "--i-understand-this-prepares-robotaua-application"]
+    if mode == "submit":
+        if site == "djinni":
+            return [*cmd, "--execute", "--i-understand-this-submits-applications"]
+        if site == "workua":
+            return [
+                *cmd,
+                "--execute",
+                "--i-understand-this-prepares-workua-application",
+                "--i-understand-this-submits-workua-application",
+            ]
+        if site == "dou":
+            return [*cmd, "--execute", "--i-understand-this-fills-dou-form", "--i-understand-this-sends-dou-applications"]
+        if site == "robotaua":
+            return [
+                *cmd,
+                "--execute",
+                "--i-understand-this-prepares-robotaua-application",
+                "--i-understand-this-submits-robotaua-application",
+            ]
+    raise ValueError(f"Unsupported run mode/site: {mode}/{site}")
+
+
+def append_jsonl(path: Path, event: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def launch_review_runs(batch: Path, mode: str, stamp: str) -> list[dict[str, str | int]]:
+    rows = approved_review_rows(batch)
+    if not rows:
+        return []
+    log_path = WEB_RUNS_DIR / f"djinni_inbox_{mode}_{stamp}.log"
+    jsonl_log = WEB_RUNS_DIR / f"djinni_inbox_{mode}_{stamp}.jsonl"
+    if mode == "dry-run":
+        for row in rows:
+            append_jsonl(
+                jsonl_log,
+                {
+                    "schema": "job.djinni_inbox_reply_attempt.v0",
+                    "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "site": "djinni_inbox",
+                    "source_url": row.get("url", ""),
+                    "company": row.get("company", ""),
+                    "title": row.get("title", ""),
+                    "result": "dry_run_ok",
+                    "message_length": len(row.get("message", "")),
+                },
+            )
+        log_path.write_text(f"dry-run ok for {len(rows)} Djinni inbox review row(s)\n", encoding="utf-8")
+        return [{"site": "djinni_inbox", "mode": mode, "rows": len(rows), "pid": 0, "stdout_log": str(log_path), "jsonl_log": str(jsonl_log)}]
+    if mode == "prepare":
+        action = "--prepare-thank-you"
+    elif mode == "submit":
+        action = "--send-thank-you"
+    else:
+        raise ValueError(f"Unsupported review mode: {mode}")
+    wrapper = ROOT / "src" / "recruiter_response_scan.py"
+    lines = []
+    pids: list[int] = []
+    for idx, row in enumerate(rows, start=1):
+        message = (row.get("message") or "").strip()
+        if not message:
+            append_jsonl(
+                jsonl_log,
+                {
+                    "schema": "job.djinni_inbox_reply_attempt.v0",
+                    "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "site": "djinni_inbox",
+                    "source_url": row.get("url", ""),
+                    "result": "blocked_validation",
+                    "blocked_reason": "empty review message",
+                },
+            )
+            continue
+        cmd = [
+            sys.executable,
+            str(wrapper),
+            "--thread-url",
+            row.get("url", ""),
+            action,
+            "--message",
+            message,
+        ]
+        if mode == "submit":
+            cmd.append("--i-understand-this-sends-recruiter-message")
+        row_log = WEB_RUNS_DIR / f"djinni_inbox_{mode}_{stamp}_{idx}.log"
+        with row_log.open("w", encoding="utf-8") as log_handle:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_handle, stderr=subprocess.STDOUT)
+        pids.append(proc.pid)
+        lines.append(f"row {idx}: pid={proc.pid} url={row.get('url', '')} log={row_log}")
+        append_jsonl(
+            jsonl_log,
+            {
+                "schema": "job.djinni_inbox_reply_attempt.v0",
+                "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "site": "djinni_inbox",
+                "source_url": row.get("url", ""),
+                "company": row.get("company", ""),
+                "title": row.get("title", ""),
+                "result": "started",
+                "mode": mode,
+                "pid": proc.pid,
+                "message_length": len(message),
+            },
+        )
+    log_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return [{"site": "djinni_inbox", "mode": mode, "rows": len(rows), "pid": pids[0] if pids else 0, "stdout_log": str(log_path), "jsonl_log": str(jsonl_log)}]
+
+
+def launch_approved_runs(batch: Path, mode: str) -> list[dict[str, str | int]]:
+    jobs: list[dict[str, str | int]] = []
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    for site, rows in sorted(approved_rows_by_site(batch).items()):
+        if not rows:
+            continue
+        csv_path = write_site_csv(site, rows, mode)
+        log_path = WEB_RUNS_DIR / f"{site}_{mode}_{stamp}.log"
+        jsonl_log = WEB_RUNS_DIR / f"{site}_{mode}_{stamp}.jsonl"
+        cmd = command_for_site(site, csv_path, mode, jsonl_log)
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_handle, stderr=subprocess.STDOUT)
+        jobs.append(
+            {
+                "site": site,
+                "mode": mode,
+                "rows": len(rows),
+                "pid": proc.pid,
+                "csv": str(csv_path),
+                "stdout_log": str(log_path),
+                "jsonl_log": str(jsonl_log),
+            }
+        )
+    jobs.extend(launch_review_runs(batch, mode, stamp))
+    return jobs
 
 
 def log_tail(path: Path, limit: int = 12) -> list[dict]:
@@ -82,6 +671,171 @@ def log_tail(path: Path, limit: int = 12) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+def infer_site_from_log_path(path: Path) -> str:
+    stem = path.stem.lower()
+    if stem.startswith("djinni_inbox"):
+        return "djinni_inbox"
+    for site in [*sorted(ACTIONABLE_SITE_NAMES), "djinni"]:
+        if stem.startswith(site):
+            return site
+    return ""
+
+
+def event_sort_key(event: dict) -> str:
+    return str(event.get("attempted_at") or event.get("created_at") or event.get("_file_mtime") or "")
+
+
+def event_has_submit_success_evidence(event: dict) -> bool:
+    after = event.get("after")
+    if not isinstance(after, dict):
+        after = {}
+    after_url = str(after.get("url") or "").lower()
+    after_title = str(after.get("title") or "").lower()
+    submitted = event.get("submitted")
+    if isinstance(submitted, dict) and submitted.get("submitted") is True:
+        if "/jobseeker/my/resumes/sent/" in after_url:
+            return True
+    success_markers = [
+        "/jobseeker/my/resumes/sent/",
+        "application-sent",
+        "apply/success",
+        "applied=true",
+    ]
+    if any(marker in after_url for marker in success_markers):
+        return True
+    return "submitted" in after_title or "sent" in after_title
+
+
+def display_result(event: dict) -> str:
+    result = str(event.get("result") or "")
+    if result == "submit_clicked_unconfirmed" and event_has_submit_success_evidence(event):
+        return "submitted_success_inferred"
+    return result
+
+
+def submission_log_events(limit: int = 30) -> list[dict]:
+    events: list[dict] = []
+    for log_site, log_path in SUBMISSION_LOGS.items():
+        for item in log_tail(log_path, limit=8):
+            item = dict(item)
+            item.setdefault("site", log_site)
+            item["_file_mtime"] = str(log_path.stat().st_mtime if log_path.exists() else "")
+            events.append(item)
+    if WEB_RUNS_DIR.exists():
+        jsonl_files = sorted(WEB_RUNS_DIR.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:40]
+        for log_path in jsonl_files:
+            inferred_site = infer_site_from_log_path(log_path)
+            for item in log_tail(log_path, limit=8):
+                item = dict(item)
+                if inferred_site:
+                    item.setdefault("site", inferred_site)
+                item["_file_mtime"] = str(log_path.stat().st_mtime)
+                item["_log_file"] = log_path.name
+                events.append(item)
+    events.sort(key=event_sort_key, reverse=True)
+    return events[:limit]
+
+
+def sent_application_events(limit: int = 500) -> list[dict]:
+    sent: dict[str, dict] = {}
+    events: list[dict] = []
+    for log_site, log_path in SUBMISSION_LOGS.items():
+        if not log_path.exists():
+            continue
+        for item in log_tail(log_path, limit=100000):
+            item = dict(item)
+            item.setdefault("site", log_site)
+            item["_file_mtime"] = str(log_path.stat().st_mtime)
+            item["_log_file"] = log_path.name
+            events.append(item)
+    if WEB_RUNS_DIR.exists():
+        for log_path in sorted(WEB_RUNS_DIR.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True):
+            inferred_site = infer_site_from_log_path(log_path)
+            for item in log_tail(log_path, limit=100000):
+                item = dict(item)
+                if inferred_site:
+                    item.setdefault("site", inferred_site)
+                item["_file_mtime"] = str(log_path.stat().st_mtime)
+                item["_log_file"] = log_path.name
+                events.append(item)
+    for event in events:
+        result = display_result(event)
+        if result not in {"submitted_success", "submitted_success_inferred", "already_applied"}:
+            continue
+        url = str(event.get("source_url") or event.get("url") or "").strip()
+        key = url.lower().rstrip("/") if url else f"event:{len(sent)}"
+        event = dict(event)
+        event["_display_result"] = result
+        if key not in sent or event_sort_key(event) > event_sort_key(sent[key]):
+            sent[key] = event
+    return sorted(sent.values(), key=event_sort_key, reverse=True)
+
+
+def render_language_switch(path: str, lang: str) -> str:
+    other = "en" if normalize_lang(lang) == "uk" else "uk"
+    return (
+        f"<div class='lang-switch'>{html.escape(text_for(lang, 'language'))}: "
+        f"<strong>{normalize_lang(lang).upper()}</strong> | "
+        f"<a href='{html.escape(url_with_lang(path, other))}'>{other.upper()}</a></div>"
+    )
+
+
+FUNCTION_MAP_STYLE = """
+    .map-controls { display: flex; gap: 12px; margin: 18px 0; flex-wrap: wrap; align-items: center; }
+    .map-controls select, .map-controls input { padding: 7px 9px; border: 1px solid #bcccdc; border-radius: 6px; }
+    .function-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
+    .mind-map { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 13px; }
+    .map-node {
+      min-height: 104px; text-align: left; border: 2px solid var(--group-color); background: #fff;
+      border-left-width: 8px; border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;
+      transition: transform .12s ease, box-shadow .12s ease; outline: none;
+    }
+    .map-node:hover, .map-node:focus, .map-node.selected { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(31, 41, 51, .13); }
+    .map-node span { font-weight: 700; line-height: 1.25; }
+    .map-node small { color: #52606d; margin-top: 10px; }
+    .shape-diamond { border-radius: 2px 18px 2px 18px; }
+    .shape-round { border-radius: 999px; min-height: 112px; padding-left: 18px; }
+    .shape-cylinder { border-radius: 22px 22px 8px 8px; background: linear-gradient(#f8fbff, #fff); }
+    .shape-hex { clip-path: polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%); padding-left: 22px; padding-right: 22px; }
+    .shape-octagon { clip-path: polygon(12% 0, 88% 0, 100% 12%, 100% 88%, 88% 100%, 12% 100%, 0 88%, 0 12%); padding: 16px 20px; }
+    .status-planned { opacity: .78; }
+    .detail-panel { position: sticky; top: 16px; border: 1px solid #bcccdc; border-radius: 8px; padding: 16px; background: #f8fbf8; }
+    .detail-panel h2 { margin-top: 0; }
+    .detail-panel dt { font-weight: 700; margin-top: 10px; }
+    .detail-panel dd { margin: 2px 0 0; color: #52606d; }
+    @media (max-width: 860px) { .function-layout { grid-template-columns: 1fr; } .detail-panel { position: static; } }
+"""
+
+
+def render_page_shell(title: str, body: str, lang: str, extra_style: str = "") -> str:
+    return f"""<!doctype html>
+<html lang="{html.escape(normalize_lang(lang))}">
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2933; }}
+    main {{ max-width: 1280px; margin: 0 auto; }}
+    header {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }}
+    button, .button {{ padding: 8px 12px; border: 1px solid #8aa0b2; background: #f7fafc; border-radius: 6px; cursor: pointer; color: #1f2933; text-decoration: none; display: inline-block; }}
+    button.primary, .button.primary {{ background: #1f7a4d; color: white; border-color: #1f7a4d; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 18px; }}
+    th, td {{ text-align: left; padding: 9px 8px; border-bottom: 1px solid #d9e2ec; vertical-align: top; }}
+    .bar {{ display: flex; gap: 8px; margin: 18px 0; flex-wrap: wrap; }}
+    .muted {{ color: #66788a; }}
+    .supported-check {{ color: #1f7a4d; font-weight: 700; }}
+    .review-flow {{ color: #6b5b95; font-weight: 700; }}
+    .status {{ padding: 10px 12px; background: #eef4f8; border: 1px solid #bcccdc; border-radius: 6px; margin: 12px 0; }}
+    .lang-switch {{ white-space: nowrap; font-size: 14px; color: #52606d; }}
+{extra_style}
+  </style>
+</head>
+<body>
+<main>{body}</main>
+</body>
+</html>"""
 
 
 def event_summary(event: dict) -> str:
@@ -119,7 +873,349 @@ def scan_inbox_status(execute_profile_toggle: bool = False) -> str:
     )
 
 
-def render_page() -> str:
+def remediate_dou_listing_observations(limit: int = 4) -> str:
+    listings: list[str] = []
+    seen: set[str] = set()
+    for path in OBSERVATION_PATHS:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if str(row.get("source_site", "")).lower() != "dou":
+                continue
+            url = str(row.get("source_url") or "")
+            if not is_dou_listing_url(url) or url in seen:
+                continue
+            seen.add(url)
+            listings.append(url)
+            if len(listings) >= limit:
+                break
+        if len(listings) >= limit:
+            break
+    if not listings:
+        listings = []
+    try:
+        summary = run_dou_remediation_to_temp(listings or None)
+        remediations = summary.get("listing_remediations") or {}
+        if int(remediations.get("exact_urls_extracted") or 0) == 0 and listings:
+            fallback = run_dou_remediation_to_temp(None)
+            fallback_remediations = fallback.get("listing_remediations") or {}
+            if int(fallback_remediations.get("exact_urls_extracted") or 0) > 0:
+                summary = fallback
+    except Exception as exc:
+        return f"DOU remediation failed: {type(exc).__name__}: {exc}"
+    remediations = summary.get("listing_remediations") or {}
+    extracted = int(remediations.get("exact_urls_extracted") or 0)
+    blocked = int(remediations.get("blocked") or 0)
+    return f"DOU remediation: listings={len(listings)}, exact_urls={extracted}, blocked={blocked}"
+
+
+def run_dou_remediation_to_temp(urls: list[str] | None) -> dict[str, object]:
+    WEB_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    prefix = "listing" if urls else "default"
+    observations_path = WEB_RUNS_DIR / f"dou_{prefix}_observations_{stamp}.jsonl"
+    summary = run_dou_once(
+        "Python AI",
+        urls=urls,
+        limit=10,
+        max_pages=len(urls) if urls else 2,
+        timeout=15,
+        observations_path=observations_path,
+        progress_path=WEB_RUNS_DIR / f"dou_{prefix}_progress_{stamp}.json",
+        summary_path=WEB_RUNS_DIR / f"dou_{prefix}_summary_{stamp}.json",
+        blockers_path=WEB_RUNS_DIR / f"dou_{prefix}_blockers_{stamp}.json",
+        remediations_path=WEB_RUNS_DIR / f"dou_{prefix}_remediations_{stamp}.jsonl",
+        persist=True,
+    )
+    if observations_path.exists() and observations_path.stat().st_size:
+        merge_jsonl_by_source_url(observations_path, DOU_OBSERVATIONS_PATH)
+    return summary
+
+
+def merge_jsonl_by_source_url(source: Path, target: Path) -> None:
+    merged: dict[str, dict] = {}
+    for path in [target, source]:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            url = str(row.get("source_url") or "")
+            if url:
+                merged[url.lower().rstrip("/")] = row
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="\n") as f:
+        for row in merged.values():
+            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def render_all_sites_page(lang: str = "en") -> str:
+    lang = normalize_lang(lang)
+    state = load_state()
+    batch = Path(state["latest_batch"]) if state.get("latest_batch") else None
+    rows = candidate_summary(batch) if batch and batch.exists() else []
+    row_html = []
+    site_counts: dict[str, int] = {}
+    supported_counts: dict[str, int] = {}
+    for idx, row in enumerate(rows):
+        site = normalized_site(row)
+        supported_site = supported_submit_site(row)
+        site_counts[site or "unknown"] = site_counts.get(site or "unknown", 0) + 1
+        if supported_site:
+            supported_counts[supported_site] = supported_counts.get(supported_site, 0) + 1
+        approved = row.get("approved_to_submit") == "true" and row.get("final_submit_allowed") == "true"
+        checkbox = (
+            f"<input type='checkbox' name='row' value='{idx}' {'checked' if approved else ''}>"
+            if supported_site or is_review_send_row(row)
+            else f"<span class='muted'>{html.escape(text_for(lang, 'blocked'))}</span>"
+        )
+        row_html.append(
+            "<tr>"
+            f"<td>{checkbox}</td>"
+            f"<td>{html.escape(row.get('company', ''))}</td>"
+            f"<td>{html.escape(row.get('title', ''))}</td>"
+            f"<td><a href='{html.escape(row.get('url', ''))}' target='_blank' rel='noreferrer'>open</a></td>"
+            f"<td>{html.escape(row.get('site', ''))}</td>"
+            f"<td>{supported_cell_html(row, lang)}</td>"
+            f"<td>{html.escape(submit_blocker(row))}</td>"
+            f"<td>{html.escape(row.get('recommendation', ''))}</td>"
+            f"<td>{html.escape(row.get('score', ''))}</td>"
+            f"<td>{html.escape(text_for(lang, 'yes') if approved else text_for(lang, 'no'))}</td>"
+            "</tr>"
+        )
+    rows_html = "\n".join(row_html) or f"<tr><td colspan='10'>{html.escape(text_for(lang, 'no_batch'))}</td></tr>"
+
+    log_rows = []
+    for item in submission_log_events(limit=30):
+        log_site = str(item.get("site") or infer_site_from_log_path(Path(str(item.get("_log_file") or ""))) or "")
+        blocked_reason = str(item.get("blocked_reason", ""))
+        if display_result(item) == "submitted_success_inferred" and not blocked_reason:
+            blocked_reason = "confirmed by post-submit browser URL"
+        log_rows.append(
+            "<tr>"
+            f"<td>{html.escape(SITE_LABELS.get(log_site, log_site))}</td>"
+            f"<td>{html.escape(str(item.get('attempted_at') or item.get('created_at') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('company', '')))}</td>"
+            f"<td>{html.escape(display_result(item))}</td>"
+            f"<td>{html.escape(blocked_reason)}</td>"
+            f"<td>{html.escape(str(item.get('source_url') or item.get('url') or ''))}</td>"
+            "</tr>"
+        )
+    log_html = "\n".join(log_rows) or f"<tr><td colspan='6'>{html.escape(text_for(lang, 'no_log'))}</td></tr>"
+
+    cfg = settings()
+    model = html.escape(cfg.agent_model)
+    locations = html.escape(cfg.location_preferences)
+    batch_label = html.escape(str(batch or "none"))
+    status = html.escape(state.get("status", "idle"))
+    last_jobs = state.get("last_send_jobs") or []
+    last_job_text = "none"
+    if last_jobs:
+        last_job_text = "; ".join(
+            f"{job.get('site')} {job.get('mode')} pid={job.get('pid')} rows={job.get('rows')}" for job in last_jobs
+        )
+    counts_text = " | ".join(
+        f"Djinni inbox: {site_counts.get(site, 0)} review / {site_counts.get(site, 0)} shown"
+        if site == "djinniinbox"
+        else f"{SITE_LABELS.get(site, site)}: {supported_counts.get(site, 0)} supported / {site_counts.get(site, 0)} shown"
+        for site in sorted(set(site_counts) | ACTIONABLE_SITE_NAMES)
+        if site in ACTIONABLE_SITE_NAMES or site_counts.get(site)
+    ) or "empty"
+    body = f"""
+  <header>
+    <div>
+      <h1>{html.escape(text_for(lang, 'app_title'))}</h1>
+      <div class="muted">{html.escape(text_for(lang, 'agent_model'))}: {model} | {html.escape(text_for(lang, 'locations'))}: {locations} | {html.escape(text_for(lang, 'latest_batch'))}: {batch_label}</div>
+    </div>
+    {render_language_switch("/", lang)}
+  </header>
+
+  <form class="bar" method="post" action="/scan">
+    <button class="primary" type="submit" {tooltip_attrs(hint_for(lang, "scan"))}>{html.escape(text_for(lang, 'scan'))}</button>
+    <button type="submit" formaction="/scan-inbox" {tooltip_attrs(hint_for(lang, "scan_inbox"))}>{html.escape(text_for(lang, 'scan_inbox'))}</button>
+    <button type="submit" formaction="/profile-on" {tooltip_attrs(hint_for(lang, "profile_on"))}>{html.escape(text_for(lang, 'profile_on'))}</button>
+  </form>
+
+  <form class="bar" method="post" action="/bot-note">
+    <button type="submit" {tooltip_attrs(hint_for(lang, "bot_note"))}>{html.escape(text_for(lang, 'bot_note'))}</button>
+    <a class="button" href="/platform-progress" {tooltip_attrs(hint_for(lang, "progress"))}>{html.escape(text_for(lang, 'progress'))}</a>
+    <a class="button" href="{html.escape(url_with_lang('/function-map', lang))}" title="Interactive requirements and feature graph">{html.escape(text_for(lang, 'function_graph'))}</a>
+    <a class="button" href="{html.escape(url_with_lang('/sent-applications', lang))}" {tooltip_attrs(hint_for(lang, "sent"))}>{html.escape(text_for(lang, 'sent_page'))}</a>
+  </form>
+
+  <div class="status">
+    <b>{html.escape(text_for(lang, 'status'))}:</b> {status}<br>
+    <b>{html.escape(text_for(lang, 'site_counts'))}:</b> {html.escape(counts_text)}<br>
+    <b>{html.escape(text_for(lang, 'last_run_jobs'))}:</b> {html.escape(last_job_text)}
+  </div>
+
+  <form method="post" action="/save-approvals">
+    <div class="bar">
+      <button type="submit" {tooltip_attrs(hint_for(lang, "save_selected"))}>{html.escape(text_for(lang, 'save_selected'))}</button>
+      <button type="submit" formaction="/approve-all" {tooltip_attrs(hint_for(lang, "approve_all"))}>{html.escape(text_for(lang, 'approve_all'))}</button>
+      <button type="submit" formaction="/clear-approvals" {tooltip_attrs(hint_for(lang, "clear_all"))}>{html.escape(text_for(lang, 'clear_all'))}</button>
+      <button type="submit" formaction="/send-dry-run" {tooltip_attrs(hint_for(lang, "dry_run"))}>{html.escape(text_for(lang, 'dry_run'))}</button>
+      <button type="submit" formaction="/prepare" {tooltip_attrs(hint_for(lang, "prepare"))}>{html.escape(text_for(lang, 'prepare'))}</button>
+      <button type="submit" formaction="/send" class="primary" {tooltip_attrs(hint_for(lang, "send"))}>{html.escape(text_for(lang, 'send'))}</button>
+    </div>
+    <table>
+      <thead><tr><th>{html.escape(text_for(lang, 'ok'))}</th><th>{html.escape(text_for(lang, 'company'))}</th><th>{html.escape(text_for(lang, 'title'))}</th><th>{html.escape(text_for(lang, 'url'))}</th><th>{html.escape(text_for(lang, 'site'))}</th><th>{html.escape(text_for(lang, 'supported'))}</th><th>{html.escape(text_for(lang, 'blocker'))}</th><th>{html.escape(text_for(lang, 'recommendation'))}</th><th>{html.escape(text_for(lang, 'score'))}</th><th>{html.escape(text_for(lang, 'approved'))}</th></tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+  </form>
+
+  <h2>{html.escape(text_for(lang, 'submission_log'))}</h2>
+  <table>
+    <thead><tr><th>{html.escape(text_for(lang, 'site'))}</th><th>{html.escape(text_for(lang, 'time'))}</th><th>{html.escape(text_for(lang, 'company'))}</th><th>{html.escape(text_for(lang, 'result'))}</th><th>{html.escape(text_for(lang, 'blocked_reason'))}</th><th>{html.escape(text_for(lang, 'url'))}</th></tr></thead>
+    <tbody>{log_html}</tbody>
+  </table>
+"""
+    return render_page_shell(text_for(lang, "app_title"), body, lang)
+
+
+def render_sent_applications_page(lang: str = "en") -> str:
+    lang = normalize_lang(lang)
+    rows = []
+    for item in sent_application_events():
+        log_site = str(item.get("site") or infer_site_from_log_path(Path(str(item.get("_log_file") or ""))) or "")
+        url = str(item.get("source_url") or item.get("url") or "")
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('attempted_at') or item.get('created_at') or ''))}</td>"
+            f"<td>{html.escape(SITE_LABELS.get(log_site, log_site))}</td>"
+            f"<td>{html.escape(str(item.get('company', '')))}</td>"
+            f"<td>{html.escape(str(item.get('title', '')))}</td>"
+            f"<td><a href='{html.escape(url)}' target='_blank' rel='noreferrer'>open</a></td>"
+            f"<td>{html.escape(str(item.get('_display_result') or display_result(item)))}</td>"
+            "</tr>"
+        )
+    rows_html = "\n".join(rows) or f"<tr><td colspan='6'>{html.escape(text_for(lang, 'sent_empty'))}</td></tr>"
+    body = f"""
+  <header>
+    <div>
+      <h1>{html.escape(text_for(lang, 'sent_title'))}</h1>
+      <div class="muted"><a href="{html.escape(url_with_lang('/', lang))}">{html.escape(text_for(lang, 'back'))}</a></div>
+    </div>
+    {render_language_switch("/sent-applications", lang)}
+  </header>
+  <table>
+    <thead><tr><th>{html.escape(text_for(lang, 'time'))}</th><th>{html.escape(text_for(lang, 'site'))}</th><th>{html.escape(text_for(lang, 'company'))}</th><th>{html.escape(text_for(lang, 'title'))}</th><th>{html.escape(text_for(lang, 'url'))}</th><th>{html.escape(text_for(lang, 'result'))}</th></tr></thead>
+    <tbody>{rows_html}</tbody>
+  </table>
+"""
+    return render_page_shell(text_for(lang, "sent_title"), body, lang)
+
+
+def render_function_map_page(lang: str = "en") -> str:
+    lang = normalize_lang(lang)
+    graph = function_graph()
+    nodes = graph["nodes"]
+    groups = graph["groups"]
+    group_options = "\n".join(
+        f"<option value='{html.escape(group_id)}'>{html.escape(str(group.get('label', group_id)))}</option>"
+        for group_id, group in groups.items()
+    )
+    cards = []
+    for node in nodes:
+        group = str(node.get("group", ""))
+        shape = str(node.get("shape", "box"))
+        status = str(node.get("status", ""))
+        detail = str(node.get("detail", ""))
+        label = str(node.get("label", ""))
+        owner = str(node.get("owner", "system"))
+        color = str(groups.get(group, {}).get("color", "#4a5568"))
+        cards.append(
+            f"<button class='map-node shape-{html.escape(shape)} status-{html.escape(status)}' "
+            f"data-group='{html.escape(group)}' data-detail='{html.escape(detail, quote=True)}' "
+            f"data-owner='{html.escape(owner, quote=True)}' data-status='{html.escape(status, quote=True)}' "
+            f"style='--group-color:{html.escape(color)}' title='{html.escape(detail, quote=True)}'>"
+            f"<span>{html.escape(label)}</span><small>{html.escape(group)} | {html.escape(status)}</small>"
+            "</button>"
+        )
+    edges = graph["edges"]
+    edge_rows = "\n".join(
+        "<tr>"
+        f"<td>{html.escape(str(edge.get('source', '')))}</td>"
+        f"<td>{html.escape(str(edge.get('label', '')))}</td>"
+        f"<td>{html.escape(str(edge.get('target', '')))}</td>"
+        "</tr>"
+        for edge in edges
+    )
+    graph_json = html.escape(json.dumps(graph, ensure_ascii=False), quote=True)
+    body = f"""
+  <header>
+    <div>
+      <h1>{html.escape(text_for(lang, 'function_graph'))}</h1>
+      <div class="muted">Interactive local feature graph; hover or focus a node to see details.</div>
+    </div>
+    <div class="bar">
+      <a class="button" href="{html.escape(url_with_lang('/', lang))}">{html.escape(text_for(lang, 'back'))}</a>
+      <a class="button" href="/function-map.json">JSON</a>
+    </div>
+  </header>
+  <section class="map-controls">
+    <label>Group <select id="groupFilter"><option value="">All</option>{group_options}</select></label>
+    <label>Text <input id="textFilter" type="search" placeholder="filter"></label>
+  </section>
+  <section class="function-layout" data-graph="{graph_json}">
+    <div class="mind-map">{''.join(cards)}</div>
+    <aside class="detail-panel">
+      <h2 id="detailTitle">Hover a node</h2>
+      <p id="detailText">Task details will appear here.</p>
+      <dl><dt>Status</dt><dd id="detailStatus">-</dd><dt>Owner</dt><dd id="detailOwner">-</dd></dl>
+    </aside>
+  </section>
+  <section class="section">
+    <h2>Relationships</h2>
+    <table><thead><tr><th>Source</th><th>Relation</th><th>Target</th></tr></thead><tbody>{edge_rows}</tbody></table>
+  </section>
+  <script>
+    const nodes = Array.from(document.querySelectorAll('.map-node'));
+    const title = document.getElementById('detailTitle');
+    const text = document.getElementById('detailText');
+    const status = document.getElementById('detailStatus');
+    const owner = document.getElementById('detailOwner');
+    function showNode(node) {{
+      title.textContent = node.querySelector('span').textContent;
+      text.textContent = node.dataset.detail || '';
+      status.textContent = node.dataset.status || '';
+      owner.textContent = node.dataset.owner || '';
+      nodes.forEach(item => item.classList.toggle('selected', item === node));
+    }}
+    nodes.forEach(node => {{
+      node.addEventListener('mouseenter', () => showNode(node));
+      node.addEventListener('focus', () => showNode(node));
+      node.addEventListener('click', () => showNode(node));
+    }});
+    function applyFilters() {{
+      const group = document.getElementById('groupFilter').value;
+      const needle = document.getElementById('textFilter').value.toLowerCase();
+      nodes.forEach(node => {{
+        const haystack = (node.textContent + ' ' + node.dataset.detail).toLowerCase();
+        const visible = (!group || node.dataset.group === group) && (!needle || haystack.includes(needle));
+        node.hidden = !visible;
+      }});
+    }}
+    document.getElementById('groupFilter').addEventListener('change', applyFilters);
+    document.getElementById('textFilter').addEventListener('input', applyFilters);
+  </script>
+"""
+    return render_page_shell(text_for(lang, "function_graph"), body, lang, extra_style=FUNCTION_MAP_STYLE)
+
+
+def render_page(lang: str = "en") -> str:
+    return render_all_sites_page(lang)
+
     state = load_state()
     batch = Path(state["latest_batch"]) if state.get("latest_batch") else None
     rows = candidate_summary(batch) if batch and batch.exists() else []
@@ -234,6 +1330,7 @@ def render_page() -> str:
 
 
 def render_platform_progress_page() -> str:
+    refresh_unresolved_blockers()
     snapshot = build_progress_snapshot(limit=120).to_dict()
     nodes = snapshot.get("nodes", [])
     edges = snapshot.get("edges", [])
@@ -255,6 +1352,16 @@ def render_platform_progress_page() -> str:
         meta_parts = [kind]
         if score not in {"", None}:
             meta_parts.append(f"score {score}")
+        details = ""
+        if node.get("kind") == "blocker":
+            reason = str(data.get("blocked_reason") or "")
+            category = str(data.get("category") or "")
+            options = data.get("resolution_options") if isinstance(data.get("resolution_options"), list) else []
+            option_text = " | ".join(str(item.get("label", "")) for item in options[:2] if isinstance(item, dict))
+            details = (
+                f"<p><b>{html.escape(category)}</b>: {html.escape(reason[:220])}</p>"
+                f"<p>{html.escape(option_text)}</p>"
+            )
         link = ""
         if url.startswith(("http://", "https://")):
             link = f"<a href='{html.escape(url)}' target='_blank' rel='noreferrer'>open</a>"
@@ -263,6 +1370,7 @@ def render_platform_progress_page() -> str:
             f"<div class='node-top'><code>{node_id}</code><span>{status}</span></div>"
             f"<h3>{label}</h3>"
             f"<p>{html.escape(' | '.join(str(part) for part in meta_parts if part))}</p>"
+            f"{details}"
             f"{link}"
             "</article>"
         )
@@ -270,10 +1378,13 @@ def render_platform_progress_page() -> str:
     pipeline_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "pipeline_stage")
     job_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "job")
     draft_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "outreach_draft")
+    blocker_html = "\n".join(node_card(node) for node in nodes if node.get("kind") == "blocker")
     if not job_html:
         job_html = "<p class='empty'>No shared job rows yet.</p>"
     if not draft_html:
         draft_html = "<p class='empty'>No outreach drafts yet.</p>"
+    if not blocker_html:
+        blocker_html = "<p class='empty'>No unresolved blockers yet.</p>"
 
     edge_rows = []
     for edge in edges[:80]:
@@ -359,6 +1470,10 @@ def render_platform_progress_page() -> str:
     <div class="cards">{draft_html}</div>
   </section>
   <section class="section">
+    <h2>Unresolved Blockers</h2>
+    <div class="cards">{blocker_html}</div>
+  </section>
+  <section class="section">
     <h2>Edges</h2>
     <table><thead><tr><th>Source</th><th>Target</th><th>Label</th><th>Status</th></tr></thead><tbody>{edge_html}</tbody></table>
   </section>
@@ -374,8 +1489,18 @@ def render_platform_progress_page() -> str:
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        lang = lang_from_request(self.path)
         if path == "/":
-            self.respond_html(render_page())
+            self.respond_html(render_page(lang))
+            return
+        if path == "/sent-applications":
+            self.respond_html(render_sent_applications_page(lang))
+            return
+        if path == "/function-map":
+            self.respond_html(render_function_map_page(lang))
+            return
+        if path == "/function-map.json":
+            self.respond_json(function_graph())
             return
         if path == "/platform-progress":
             self.respond_html(render_platform_progress_page())
@@ -390,12 +1515,12 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace")) if length else {}
         if path == "/scan":
-            build_resume_index()
-            inbox_note = scan_inbox_status(execute_profile_toggle=False)
-            batch = build_candidate_batch(limit=10)
+            summary = run_all_sources_scan(limit=10, max_pages=1)
+            batch = Path(str(summary.get("batch", "")))
             state = load_state()
             state["latest_batch"] = str(batch)
-            state["status"] = f"built batch: {batch}; {inbox_note}"
+            state["status"] = format_scan_summary(summary)
+            state["last_send_jobs"] = []
             save_state(state)
             self.redirect("/")
             return
@@ -419,47 +1544,42 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/approve-all":
                 changed, skipped = update_batch_approvals(batch, approve_all=True)
-                state["status"] = f"approved all supported Djinni rows: {changed}; skipped review-only rows: {skipped}"
+                state["status"] = f"approved all supported + Djinni inbox review rows: {changed}; blocked rows: {skipped}"
             elif path == "/clear-approvals":
                 changed, skipped = update_batch_approvals(batch, selected=set())
-                state["status"] = f"cleared approvals; review-only rows skipped: {skipped}"
+                state["status"] = f"cleared approvals; blocked/review-only rows: {skipped}"
             else:
                 selected = {int(v) for v in form.get("row", []) if str(v).isdigit()}
                 changed, skipped = update_batch_approvals(batch, selected=selected)
-                state["status"] = f"saved selected approvals: {changed}; review-only rows skipped: {skipped}"
+                state["status"] = f"saved selected approvals: {changed}; blocked/review-only rows: {skipped}"
             save_state(state)
             self.redirect("/")
             return
-        if path == "/send":
+        if path in {"/send-dry-run", "/prepare", "/send"}:
             state = load_state()
-            batch = state.get("latest_batch")
-            if not batch:
+            batch_text = state.get("latest_batch")
+            if not batch_text:
                 self.send_error(400, "No latest batch")
                 return
-            approved_count = count_approved_rows(Path(batch))
+            batch = Path(batch_text)
+            if not batch.exists():
+                self.send_error(400, "Latest batch does not exist")
+                return
+            approved_count = count_approved_rows(batch)
             if approved_count == 0:
-                state["status"] = "send blocked: no approved Djinni rows"
+                state["status"] = "run blocked: no approved supported rows"
                 save_state(state)
                 self.redirect("/")
                 return
-            send_log = ROOT / "data" / "job_waves" / "web_send_last.log"
-            log_handle = send_log.open("w", encoding="utf-8")
-            proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(ROOT / "src" / "djinni_csv_apply.py"),
-                    "--csv",
-                    batch,
-                    "--execute",
-                    "--i-understand-this-submits-applications",
-                ],
-                cwd=str(ROOT),
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-            )
-            state["status"] = f"send started for {approved_count} approved row(s); refresh this page and check Submission Log Tail"
-            state["last_send_pid"] = proc.pid
-            state["last_send_log"] = str(send_log)
+            mode = {"send-dry-run": "dry-run", "prepare": "prepare", "send": "submit"}[path.lstrip("/")]
+            jobs = launch_approved_runs(batch, mode)
+            if not jobs:
+                state["status"] = "run blocked: approved rows did not match supported site validators"
+                state["last_send_jobs"] = []
+            else:
+                rows_started = sum(int(job["rows"]) for job in jobs)
+                state["status"] = f"{mode} started for {rows_started} approved row(s) across {len(jobs)} site job(s)"
+                state["last_send_jobs"] = jobs
             save_state(state)
             self.redirect("/")
             return

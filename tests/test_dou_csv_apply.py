@@ -74,6 +74,11 @@ class DouCsvApplyTest(unittest.TestCase):
         errors = dou_csv_apply.validate_row(row(url="https://jobs.dou.ua/companies/example/vacancies/"))
         self.assertIn("url must be an exact https DOU vacancy URL ending in /vacancies/<id>/", errors)
 
+    def test_exact_url_validation_accepts_jobs_and_relocate_vacancies(self) -> None:
+        self.assertTrue(dou_csv_apply.is_exact_dou_vacancy_url("https://jobs.dou.ua/companies/example/vacancies/12345/"))
+        self.assertTrue(dou_csv_apply.is_exact_dou_vacancy_url("https://relocate.dou.ua/companies/example/vacancies/12345/"))
+        self.assertFalse(dou_csv_apply.is_exact_dou_vacancy_url("https://relocate.dou.ua/jobs/?category=Python&from=maybe"))
+
     def test_read_rows_rejects_message_file_for_live_dou_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "approved.csv"

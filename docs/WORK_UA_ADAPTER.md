@@ -18,11 +18,16 @@ settings.
 - `src/workua_csv_apply.py`: browser-assisted CSV adapter for explicitly
   approved Work.ua rows. Dry-run is default; browser prepare and final submit
   require separate CLI flags.
+- `src/workua_resume_update.py`: generic guarded Work.ua resume edit helper.
+  It accepts exact resume edit URLs and exact approved field updates, can fill
+  them through Chrome CDP, and stops before final save unless separately gated.
 - `src/job_platforms/platforms.py`: registry-facing import for `WorkUaAdapter`.
 - `tests/test_workua_adapter.py`: safe parser, gate, shared DB, and progress
   coverage.
 - `tests/test_workua_csv_apply.py`: CSV gate, upload block, LinkedIn policy, and
   dry-run attempt-log coverage.
+- `tests/test_workua_resume_update.py`: resume edit URL validation, approval
+  gates, no-save default, and generic non-hardcoded config coverage.
 
 ## Pipeline Gates
 
@@ -145,6 +150,70 @@ LinkedIn field when policy says to do so, validates the DOM immediately before
 submit, logs a JSONL attempt under `data/job_waves/`, and stops before final
 submit unless `--execute` and the final submit confirmation flag are present.
 The attempt log stores message length and SHA-256, not the message body.
+
+## Resume Update Helper
+
+`src/workua_resume_update.py` is a separate generic tool for Work.ua resume edit
+pages such as:
+
+```text
+https://www.work.ua/jobseeker/my/resumes/edit/?id=3508069
+```
+
+It is not hard-coded to one owner or one resume id. The input must provide:
+
+- `site=workua`
+- `resume_edit_url`: exact Work.ua resume edit URL with an `id` query
+- `field_updates`: exact approved field updates
+- `approved_to_prepare=true` for browser fill/prepare
+- `final_save_allowed=true` for final save
+
+Each field update must use exactly one locator: `selector`, `name`, or `label`.
+Supported field kinds are `text`, `textarea`, `select`, `checkbox`, and
+`radio`. Values are logged only as length and SHA-256 digest.
+
+Dry-run validation, no browser:
+
+```powershell
+python src\workua_resume_update.py --json path\to\workua_resume_update.json
+```
+
+Browser prepare, no save:
+
+```powershell
+python src\workua_resume_update.py --json path\to\workua_resume_update.json --prepare-browser --i-understand-this-prepares-workua-resume-update
+```
+
+Final save:
+
+```powershell
+python src\workua_resume_update.py --json path\to\workua_resume_update.json --execute-save --i-understand-this-prepares-workua-resume-update --i-understand-this-saves-workua-resume-update
+```
+
+Minimal JSON shape:
+
+```json
+{
+  "site": "workua",
+  "resume_edit_url": "https://www.work.ua/jobseeker/my/resumes/edit/?id=123",
+  "field_updates": [
+    {
+      "key": "title",
+      "selector": "#resume-title",
+      "kind": "text",
+      "value": "Senior Python Engineer"
+    }
+  ],
+  "approved_to_prepare": true,
+  "final_save_allowed": false,
+  "resume_file_policy": "no_upload"
+}
+```
+
+Optional resume file upload is gated by `resume_file_policy=upload_exact_file`,
+`upload_allowed=true`, exact `approved_resume_name`, exact
+`approved_resume_path`, and the same prepare/save CLI flags. Tests do not read
+private resume contents.
 
 ## Artifacts
 

@@ -70,6 +70,23 @@ class RobotaUaAdapterTest(unittest.TestCase):
         self.assertIn("manual_handoff_only", first.risk_flags)
         self.assertFalse(first.source_url.endswith("?"))
 
+    def test_anchor_title_is_trimmed_before_company_and_description_noise(self) -> None:
+        adapter = RobotaUaAdapter()
+        html = """
+        <a href="/company127046/vacancy11178455">
+          Python AI Engineer Universal Bank/Універсал Банк Київ Universal Bank є сучасним українським банком
+          зі стабільною репутацією протягом 30 років.
+        </a>
+        """
+
+        observations = adapter.extract_public_vacancies(
+            html,
+            "https://robota.ua/zapros/python-ai/ukraine",
+            DiscoveryQuery(text="Python AI"),
+        )
+
+        self.assertEqual(observations[0].title, "Python AI Engineer")
+
     def test_prepare_and_submit_are_not_implemented(self) -> None:
         adapter = RobotaUaAdapter()
         vacancy = adapter.normalize_vacancy(

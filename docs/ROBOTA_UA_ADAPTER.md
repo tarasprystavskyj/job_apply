@@ -56,9 +56,24 @@ profiles, saved passwords, or local CV contents.
      HTTPS Robota.ua vacancy URL, exact `message`, `resume_policy`,
      `linkedin_policy`, `approved_to_submit=true`,
      `final_submit_allowed=true`, and the explicit CLI guard flag.
-   - Resume file upload remains blocked in this guarded flow. A row may name
-     an exact resume and set `upload_allowed=true`, but
-     `resume_policy=upload_exact_resume` currently stops before upload.
+   - Base vacancy URLs are normalized to the platform apply URL variant
+     `/apply?newApply=true` before the live worker opens the form.
+   - Resume file upload is allowed only when the exact row approves
+     `resume_policy=upload_exact_resume`, `upload_allowed=true`, and the exact
+     `approved_resume_name`/approved path. The worker may use the visible
+     Robota.ua attach-resume control, but must not read private resume contents
+     or upload a real file unless the human approved that exact file for that
+     exact vacancy.
+   - If `approved_resume_path` is omitted, the worker resolves the exact file
+     name inside `JOB_APPLY_RESUME_DIR`. If `approved_resume_path` is present,
+     its basename must match `approved_resume_name`, and the path must stay
+     inside `JOB_APPLY_RESUME_DIR`, `data/job_waves/`, or
+     `data/approved_artifacts/`.
+   - Current attach selector:
+     `body > app-root > div > alliance-apply-page-shell > div > alliance-apply-page-new > div > div:nth-child(2) > div > lib-attach-apply-block > div > label > div`.
+   - File attachment uses Chrome CDP `DOM.setFileInputFiles`, followed by a
+     pre-submit verification that the selected file name matches
+     `approved_resume_name`.
 
 7. `status_tracking`
    - Shared job/outreach/status state is written to
@@ -135,6 +150,13 @@ Submit only after the same row-level gates plus the final CLI guard:
 python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --execute --i-understand-this-submits-robotaua-application
 ```
 
+Approved upload rows may include:
+
+```csv
+site,url,message,resume_policy,approved_resume_name,approved_resume_path,upload_allowed,linkedin_policy,approved_to_submit,final_submit_allowed
+robotaua,https://robota.ua/company3685368/vacancy11052703,Exact approved message...,upload_exact_resume,Senior Python CV.pdf,,true,omit_linkedin,true,true
+```
+
 Fetch one public search page, normalize vacancies, create review-only DB drafts,
 and refresh the graph:
 
@@ -156,4 +178,8 @@ python src\robotaua_pipeline.py progress
 - Review Robota.ua selectors against a real approved vacancy before first final
   submit. Use `--pre-submit` first and inspect
   `data/job_waves/robotaua_submission_attempts.jsonl`.
-- Implement exact-resume file upload only as a separate approval-gated change.
+- Keep exact-resume file upload behind the row-level approval gate and a
+  pre-submit validation pass before any final click.
+- When an approved Robota.ua live action is blocked by markup or navigation,
+  patch the adapter selector/navigation path and re-run dry-run plus
+  pre-submit before reporting manual handoff.

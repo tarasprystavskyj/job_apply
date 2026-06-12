@@ -11,6 +11,7 @@ if __package__ in {None, ""}:
 
 from job_platforms.models import ProgressEdge, ProgressNode, ProgressSnapshot, utcish_now
 from shared_job_db import DEFAULT_DB_PATH, fetch_progress_rows
+from blocker_loop import UNRESOLVED_BLOCKERS_PATH, read_jsonl
 
 
 PIPELINE = [
@@ -145,6 +146,32 @@ def build_progress_snapshot(db_path: Path = DEFAULT_DB_PATH, limit: int = 100) -
         edges.append(ProgressEdge(source=f"outreach:{outreach_id}", target="stage:review", label="review gate", status=status))
         if approved_to_submit and final_submit_allowed:
             edges.append(ProgressEdge(source=f"outreach:{outreach_id}", target="stage:submit", label="final gate", status="ready"))
+
+    for idx, blocker in enumerate(read_jsonl(UNRESOLVED_BLOCKERS_PATH), start=1):
+        key = str(blocker.get("key") or idx)
+        node_id = f"blocker:{idx}"
+        title = str(blocker.get("title") or "")
+        company = str(blocker.get("company") or "")
+        label = f"{company} - {title}" if company and title else title or str(blocker.get("blocked_reason") or "Unresolved blocker")
+        nodes.append(
+            ProgressNode(
+                id=node_id,
+                label=label[:160],
+                kind="blocker",
+                status=str(blocker.get("status") or "unresolved"),
+                data={
+                    "key": key,
+                    "category": blocker.get("category", ""),
+                    "site": blocker.get("site", ""),
+                    "source_url": blocker.get("source_url", ""),
+                    "blocked_reason": blocker.get("blocked_reason", ""),
+                    "last_seen_at": blocker.get("last_seen_at", ""),
+                    "resolution_options": blocker.get("resolution_options", []),
+                    "agent_task": blocker.get("agent_task", {}),
+                },
+            )
+        )
+        edges.append(ProgressEdge(source=node_id, target="stage:submit", label="blocks", status="blocked"))
 
     return ProgressSnapshot(
         schema="job.progress_snapshot.v0",

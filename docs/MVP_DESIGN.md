@@ -49,10 +49,6 @@ Current primary resume basis:
 
 - `Taras_Prystavskyj_AI_Integration_Resume.pdf`
 
-Structural reference only, not factual source:
-
-- `Stanislav_Shcherbak_ai_dev_eng (1).pdf`
-
 Generated resume artifacts remain in this project unless the owner explicitly
 asks to overwrite source resume files.
 

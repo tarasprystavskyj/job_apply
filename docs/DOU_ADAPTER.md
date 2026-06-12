@@ -36,6 +36,10 @@ progress.
    - Extract public vacancy title, company, location, summary, salary/freshness
      hints, fit tags, and risk flags.
    - Output shape: `job.vacancy_observation.v0`.
+   - If the input is a search/listing URL, the agent must derive exact visible
+     vacancy URLs ending in `/vacancies/<id>/` before any live approval CSV is
+     created. A listing URL may be written as a blocker only after this bounded
+     public parsing remediation fails.
 
 3. `score`
    - Score public text locally with DOU-specific fit weights.
@@ -113,10 +117,17 @@ Artifacts:
 - `data/job_waves/dou_progress_snapshot.json`
 - `data/job_waves/dou_run_once_summary.json`
 - `data/job_waves/dou_blockers.json`
+- `data/job_waves/dou_listing_remediations.jsonl`
 
 The blocker artifact records that final submit is not implemented and that exact
 owner approval is still required per vacancy, message, resume decision, and any
 future final submit action.
+
+When run-once receives a DOU search/listing URL, it writes
+`job.dou_listing_remediation.v0` rows to the remediation artifact. A successful
+remediation stores exact extracted vacancy URLs and review observations. A
+listing/search URL becomes a blocker only when this bounded public parse cannot
+extract exact `/vacancies/<id>/` URLs.
 
 ## Guarded Live Submitter
 
@@ -158,6 +169,12 @@ Required CSV columns:
 - `approved_resume_name`: required only for `resume_policy=upload_file`
 - `approved_to_submit=true`
 - `final_submit_allowed=true`
+
+Rows whose `url` is a DOU search/listing page are not live-ready. The DOU agent
+must proactively re-run public discovery on that listing/search URL, extract
+exact vacancy URLs, rebuild the review/approval artifact, and only then offer
+rows for final apply. If no exact URL can be extracted, the blocker must name
+the listing URL, the remediation attempted, and the next human/code action.
 
 Resume upload is intentionally blocked in this implementation. Rows with
 `resume_policy=upload_file` must name the exact approved resume and

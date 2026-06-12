@@ -278,6 +278,60 @@ def classify_no_apply_state(state: dict[str, Any], opened: dict[str, Any] | None
     return "no visible apply button"
 
 
+def discover_profile_update_action(tab: CdpTab) -> dict[str, Any]:
+    return tab.eval(
+        r"""
+(() => {
+  const visible = e => {
+    if (!e) return false;
+    const s = getComputedStyle(e), r = e.getBoundingClientRect();
+    return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
+  };
+  const controls = Array.from(document.querySelectorAll("a[href],button,input[type=button],input[type=submit]"))
+    .filter(visible)
+    .map(e => ({
+      tag: e.tagName,
+      text: (e.innerText || e.value || e.getAttribute("aria-label") || "").trim(),
+      href: e.href || "",
+      id: e.id || "",
+      className: String(e.className || "")
+    }))
+    .filter(e => {
+      const text = e.text.toLowerCase();
+      const href = e.href.toLowerCase();
+      const profileHref = href.includes("/my/profile") || href.includes("/profile");
+      const profileText = text.includes("profile") || text.includes("cv") ||
+        text.includes("\u043f\u0440\u043e\u0444\u0456\u043b") ||
+        text.includes("РїСЂРѕС„С–Р»");
+      const updateText = text.includes("update") || text.includes("complete") || text.includes("fill") ||
+        text.includes("\u043e\u043d\u043e\u0432") || text.includes("\u0437\u0430\u043f\u043e\u0432") ||
+        text.includes("РѕРЅРѕРІ") || text.includes("Р·Р°РїРѕРІ");
+      return profileHref || (profileText && updateText);
+    })
+    .slice(0, 10);
+  const link = controls.find(e => e.href);
+  return {
+    profile_update_required: true,
+    profile_update_url: link ? link.href : "https://djinni.co/my/profile/",
+    profile_update_action_text: controls[0] ? controls[0].text.slice(0, 160) : "",
+    profile_update_controls: controls
+  };
+})()
+"""
+    )
+
+
+def profile_update_blocker_fields(state: dict[str, Any], action: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not state.get("profile_update_required") and not (action or {}).get("profile_update_required"):
+        return {}
+    action = action or {}
+    return {
+        "profile_update_required": True,
+        "profile_update_url": action.get("profile_update_url") or state.get("profile_update_url") or "https://djinni.co/my/profile/",
+        "profile_update_action_text": action.get("profile_update_action_text") or state.get("profile_update_action_text") or "",
+    }
+
+
 inspect_state = inspect_state_precise
 
 
@@ -422,9 +476,7 @@ def validate_before_submit(tab: CdpTab, row: ApplicationRow) -> dict[str, Any]:
   details.visibleLinkedinFields = linkedinFields.length;
   details.linkedin = linkedinFields[0] ? linkedinFields[0].value : null;
   if (expected.linkedin) {{
-    if (!linkedinFields.length && expected.resumePolicy !== "use_selected_resume") {{
-      errors.push("linkedin provided in CSV but no visible linkedin input is present");
-    }} else if (linkedinFields.length && norm(linkedinFields[0].value) !== norm(expected.linkedin)) {{
+    if (linkedinFields.length && norm(linkedinFields[0].value) !== norm(expected.linkedin)) {{
       errors.push("linkedin was not transmitted to form");
     }}
   }}
@@ -538,7 +590,18 @@ def process_row(row: ApplicationRow, endpoint: str, execute: bool, log_path: Pat
         if not opened.get("ok"):
             after_open = inspect_state(tab)
             reason = classify_no_apply_state(after_open, opened)
-            append_log(log_path, {**base_event, "result": "blocked_no_apply_form", "blocked_reason": reason, "opened": opened, "state": after_open})
+            profile_action = discover_profile_update_action(tab) if after_open.get("profile_update_required") else {}
+            append_log(
+                log_path,
+                {
+                    **base_event,
+                    **profile_update_blocker_fields(after_open, profile_action),
+                    "result": "blocked_no_apply_form",
+                    "blocked_reason": reason,
+                    "opened": opened,
+                    "state": {**after_open, **profile_action},
+                },
+            )
             print(f"row {row.row_number}: blocked: {reason}")
             return 3
 

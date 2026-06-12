@@ -84,25 +84,23 @@ class JobPlatformAdapter(ABC):
         )
 
     def draft_outreach(self, vacancy: VacancyObservation, resume: ResumeArtifact | None = None) -> OutreachDraft:
-        resume_name = resume.display_name if resume else ""
         company = vacancy.company or "team"
         title = vacancy.title or "this role"
         fit = ", ".join(vacancy.fit_tags[:5]) or "Python, AI automation, and reliable delivery"
-        resume_line = f"\n\nRelevant resume for review: {resume_name}." if resume_name else ""
+        salutation = "Hi," if company.lower() == "team" else f"Hi {company} team,"
         return OutreachDraft(
             source_site=self.platform_id,
             source_url=vacancy.source_url,
             company=vacancy.company,
             title=vacancy.title,
             cover_letter=(
-                f"Hi {company},\n\n"
-                f"I am interested in {title}. The strongest fit signals I see are: {fit}.\n\n"
+                f"{salutation}\n\n"
+                f"I am interested in the \"{title}\" role. The strongest fit signals are: {fit}.\n\n"
                 "I can bring practical Python automation, AI workflow integration, and senior delivery ownership "
-                "to the role. I would align the final application text and resume variant after owner review."
-                f"{resume_line}\n\n"
+                "to the role, with careful alignment to the team's delivery process.\n\n"
                 "Best regards,\nTaras Prystavskyj"
             ),
-            resume_display_name=resume_name,
+            resume_display_name=resume.display_name if resume else "",
             submission_allowed=False,
             upload_allowed=False,
         )

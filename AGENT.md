@@ -11,6 +11,20 @@ Use this guide when installing the project on another local computer.
 - Do not reject an inbound offer or change account/profile settings unless the
   human explicitly requests that concrete action. The web UI profile-on button
   counts as explicit approval for that one profile toggle attempt.
+- Before any final submit/send, scan the exact outbound cover letter or
+  recruiter reply text. Fail closed if it contains another person's name,
+  filename-like resume references such as `.pdf` or `.doc`, or known
+  contamination such as `Stanislav_Shcherbak`.
+- Do not send internal/agentic phrases to employers or recruiters, including
+  "review artifacts", "diffs", "scoped tool use", "I would position",
+  "I should be transparent", or `Relevant resume: <filename>`.
+- Quote or rephrase job titles in outbound messages, and sanitize them before
+  use. Block or clean titles contaminated with company, location, or
+  description text.
+- Salutations must not produce duplicated wording such as "team team". If the
+  company is empty, use `Hi,` or `Hi hiring team,`.
+- If outbound-message QA fails, create a blocker artifact with the failed
+  patterns and manual/auto-clean options instead of sending.
 - Keep generated runtime data in ignored folders: `data/job_waves/`,
   `data/private/`, `tmp/`.
 
@@ -134,9 +148,34 @@ try to remove the blocker safely instead of only reporting failure. Examples:
 - Djinni requires profile updates before applying.
 - A new validation message appears on the application form.
 - A supported site changes field names or confirmation flow.
+- A discovery row contains a search/listing URL, but the live submitter needs
+  an exact vacancy URL. Fetch/parse the public listing once, derive exact
+  vacancy URLs where visible, and rebuild the review/approval artifact before
+  declaring the row blocked.
+- A public vacancy URL needs a platform-specific application URL such as
+  `/apply?newApply=true`. Try the documented safe apply URL transformation and
+  inspect the visible form before declaring that no apply form exists.
 
 Do not bypass approval gates. Profile/account changes, uploads, final sends,
 rejections, and final submits still require explicit human approval.
+Resume uploads require exact row-level approval naming the resume file, an
+approved resume path/name, `upload_allowed=true`, and the platform-specific
+CLI/UI final action gate. Agents may implement or test uploader code with
+fixtures, but they must not read private resume contents or upload a real file
+unless the human approved that exact file for that exact vacancy.
+
+For every platform live worker, blocker handling is part of the normal loop:
+
+1. Classify the blocker as `data`, `selector`, `navigation`, `auth`,
+   `validation`, `profile`, `upload`, or `site_changed`.
+2. Attempt one bounded safe remediation that does not submit, upload, change
+   account state, or read secrets/private files.
+3. Re-run dry-run or pre-submit validation for the affected path.
+4. If remediation requires code changes, delegate a narrow patch to a subagent,
+   run tests, and notify the human.
+5. If still blocked, write a concrete blocker reason plus the next human action
+   needed.
+
 When a Djinni profile-update blocker appears, the Telegram bot should provide
 the profile URL and offer to prepare a profile-update draft. Do not save profile
 fields until the human approves the exact target positioning, salary/location

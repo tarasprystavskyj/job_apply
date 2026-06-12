@@ -85,6 +85,170 @@ class FakeTab:
         raise AssertionError("unexpected script")
 
 
+class FakeUploadTab:
+    def __init__(self, expected_name: str) -> None:
+        self.expected_name = expected_name
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def call(self, method: str, params: dict | None = None) -> dict:
+        self.calls.append((method, params))
+        if method == "Runtime.evaluate":
+            return {"result": {"result": {"objectId": "file-input-object"}}}
+        if method == "DOM.setFileInputFiles":
+            return {"result": {}}
+        return {}
+
+    def eval(self, expression: str) -> dict:
+        if "attachSelector" in expression:
+            return {"ok": True, "attachSelectorFound": True, "accept": ".pdf,.doc,.docx", "visibleInput": False}
+        if "marked resume file input" in expression:
+            return {"ok": True, "fileNames": [self.expected_name], "expectedName": self.expected_name}
+        raise AssertionError("unexpected upload script")
+
+
+class FakeVisibleUploadTab(FakeUploadTab):
+    def eval(self, expression: str) -> dict:
+        if "attachSelector" in expression:
+            return {"ok": True, "attachSelectorFound": True, "accept": ".pdf,.doc,.docx", "visibleInput": False}
+        if "marked resume file input" in expression:
+            return {
+                "ok": True,
+                "fileNames": [],
+                "fileNamesBeforeEvents": [],
+                "visibleFileName": True,
+                "expectedName": self.expected_name,
+            }
+        raise AssertionError("unexpected visible upload script")
+
+
+class FakeWs:
+    def __init__(self, messages: list[dict]) -> None:
+        self.messages = list(messages)
+        self.sent: list[dict] = []
+
+    def send(self, payload: str) -> None:
+        self.sent.append(json.loads(payload))
+
+    def recv(self) -> str:
+        if not self.messages:
+            raise AssertionError("unexpected websocket recv")
+        return json.dumps(self.messages.pop(0))
+
+
+class FakeChooserFallbackUploadTab(FakeUploadTab):
+    def __init__(self, expected_name: str) -> None:
+        super().__init__(expected_name)
+        self._next_id = 100
+        self.ws = FakeWs(
+            [
+                {"method": "Page.fileChooserOpened", "params": {"backendNodeId": 777}},
+                {"id": 100, "result": {"result": {"value": {"ok": True}}}},
+            ]
+        )
+        self.verify_calls = 0
+
+    def call(self, method: str, params: dict | None = None) -> dict:
+        self.calls.append((method, params))
+        if method == "Runtime.evaluate":
+            return {"result": {"result": {"objectId": "file-input-object"}}}
+        if method == "DOM.setFileInputFiles":
+            return {"result": {}}
+        if method == "DOM.getDocument":
+            return {"result": {}}
+        if method == "Page.setInterceptFileChooserDialog":
+            return {"result": {}}
+        return {}
+
+    def eval(self, expression: str) -> dict:
+        if "attachSelector" in expression:
+            return {"ok": True, "attachSelectorFound": True, "accept": ".pdf,.doc,.docx", "visibleInput": False}
+        if "marked resume file input" in expression or "resume file input disappeared" in expression:
+            self.verify_calls += 1
+            if self.verify_calls == 1:
+                return {"ok": False, "fileNames": [], "expectedName": self.expected_name}
+            return {"ok": True, "fileNames": [self.expected_name], "expectedName": self.expected_name}
+        raise AssertionError("unexpected chooser fallback script")
+
+
+class FakePolicyRequiresResumeTab:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def call(self, _method: str, _params: dict | None = None) -> dict:
+        return {}
+
+    def close(self) -> None:
+        self.closed = True
+
+    def eval(self, expression: str) -> dict:
+        if "already_applied" in expression:
+            return {
+                "url": "https://robota.ua/company123/vacancy987654/apply?newApply=true",
+                "title": "Apply",
+                "body_start": (
+                    "\u041e\u0431\u0435\u0440\u0456\u0442\u044c \u0441\u043f\u043e\u0441\u0456\u0431 "
+                    "\u0432\u0456\u0434\u0433\u0443\u043a\u0443 / "
+                    "\u0421\u0442\u0432\u043e\u0440\u0438\u0442\u0438 \u0440\u0435\u0437\u044e\u043c\u0435 / "
+                    "\u041f\u0440\u0438\u043a\u0440\u0456\u043f\u0438\u0442\u0438 \u0444\u0430\u0439\u043b "
+                    "\u0437 \u0440\u0435\u0437\u044e\u043c\u0435 / "
+                    "\u0414\u043e\u0434\u0430\u0442\u0438 \u0441\u0443\u043f\u0440\u043e\u0432\u0456\u0434\u043d\u0438\u0439 "
+                    "\u043b\u0438\u0441\u0442 / \u041f\u0440\u043e\u0434\u043e\u0432\u0436\u0438\u0442\u0438"
+                ),
+                "already_applied": False,
+                "login_required": False,
+                "inactive": False,
+                "controls": [],
+                "fields": [],
+                "alerts": [],
+            }
+        raise AssertionError("unexpected script")
+
+
+class FakeApplyMethodTab:
+    def eval(self, expression: str) -> dict:
+        if "attach-resume method selected" in expression:
+            return {"ok": True, "opened": True, "reason": "attach-resume method selected", "text": "Attach"}
+        raise AssertionError("unexpected apply-method script")
+
+
+class FakeCoverLetterTab:
+    def eval(self, expression: str) -> dict:
+        if "cover-letter opener" in expression:
+            return {"ok": True, "opened": True, "text": "Add cover letter"}
+        raise AssertionError("unexpected cover-letter script")
+
+
+class FakeExactCoverLetterTab:
+    def eval(self, expression: str) -> dict:
+        if apply.ROBOTAU_COVER_LETTER_SELECTOR not in expression:
+            raise AssertionError("exact cover letter selector was not used")
+        return {"ok": True, "opened": True, "selector": apply.ROBOTAU_COVER_LETTER_SELECTOR}
+
+
+class FakeExactSubmitTab:
+    def eval(self, expression: str) -> dict:
+        if apply.ROBOTAU_FINAL_SEND_SELECTOR not in expression:
+            raise AssertionError("exact final send selector was not used")
+        return {"ok": True, "submitted": True, "selector": apply.ROBOTAU_FINAL_SEND_SELECTOR}
+
+
+class FakeFillCoverSelectorTab:
+    def eval(self, expression: str) -> dict:
+        if "filledAnswers" not in expression:
+            raise AssertionError("unexpected fill script")
+        if apply.ROBOTAU_COVER_LETTER_SELECTOR not in expression:
+            raise AssertionError("exact cover letter selector was not used during fill")
+        return {
+            "ok": True,
+            "messageLength": len(EXACT_MESSAGE),
+            "linkedinFields": 1,
+            "linkedin": "https://www.linkedin.com/in/taras-prystavskyj/",
+            "fileInputs": 0,
+            "selectedResumeText": [],
+            "coverLetterSelectorUsed": True,
+        }
+
+
 class RobotauaCsvApplyTest(unittest.TestCase):
     def test_validate_row_requires_robotaua_gate_data_for_live_modes(self) -> None:
         row = approved_row(approved_to_submit=False, final_submit_allowed=False)
@@ -97,8 +261,165 @@ class RobotauaCsvApplyTest(unittest.TestCase):
         errors = apply.validate_row(row, "submit")
         self.assertIn("upload_allowed=true is required when resume_policy=upload_exact_resume", errors)
 
+    def test_validate_row_accepts_exact_resume_file_inside_resume_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply, "DEFAULT_RESUME_DIR", Path(tmp)):
+            resume = Path(tmp) / "Senior Python CV.pdf"
+            resume.write_bytes(b"")
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name=resume.name,
+                upload_allowed=True,
+            )
+            self.assertEqual(apply.validate_row(row, "pre_submit"), [])
+
+    def test_validate_row_blocks_resume_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply, "DEFAULT_RESUME_DIR", Path(tmp)):
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name="..\\Senior Python CV.pdf",
+                upload_allowed=True,
+            )
+            errors = apply.validate_row(row, "pre_submit")
+            self.assertIn("approved_resume_name must be an exact file name, not a path", errors)
+
+    def test_validate_row_blocks_approved_resume_path_outside_allowed_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply, "DEFAULT_RESUME_DIR", Path(tmp) / "resumes"):
+            outside = Path(tmp) / "outside" / "Senior Python CV.pdf"
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name=outside.name,
+                approved_resume_path=str(outside),
+                upload_allowed=True,
+            )
+            errors = apply.validate_row(row, "pre_submit")
+            self.assertIn("approved resume path must stay inside the resume directory or approved artifact directory", errors)
+
+    def test_explicit_approved_resume_path_does_not_fall_back_to_same_name_default_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            resume_dir = Path(tmp) / "resumes"
+            artifact_dir = Path(tmp) / "artifacts"
+            resume_dir.mkdir()
+            artifact_dir.mkdir()
+            fallback = resume_dir / "Senior Python CV.pdf"
+            fallback.write_bytes(b"")
+            explicit_missing = artifact_dir / fallback.name
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name=fallback.name,
+                approved_resume_path=str(explicit_missing),
+                upload_allowed=True,
+            )
+            with (
+                patch.object(apply, "DEFAULT_RESUME_DIR", resume_dir),
+                patch.object(apply, "APPROVED_RESUME_ARTIFACT_DIRS", (artifact_dir,)),
+            ):
+                errors = apply.validate_row(row, "pre_submit")
+            self.assertIn(f"approved resume file was not found: {explicit_missing}", errors)
+
     def test_validate_row_accepts_approved_no_resume_submit_row(self) -> None:
         self.assertEqual(apply.validate_row(approved_row(), "submit"), [])
+
+    def test_application_form_url_adds_new_apply_path(self) -> None:
+        self.assertEqual(
+            apply.application_form_url("https://robota.ua/company3685368/vacancy11052703"),
+            "https://robota.ua/company3685368/vacancy11052703/apply?newApply=true",
+        )
+        self.assertEqual(
+            apply.application_form_url("https://robota.ua/company3685368/vacancy11052703/apply?newApply=true"),
+            "https://robota.ua/company3685368/vacancy11052703/apply?newApply=true",
+        )
+        self.assertEqual(
+            apply.application_form_url("https://robota.ua/company3685368/vacancy11052703?from=search"),
+            "https://robota.ua/company3685368/vacancy11052703/apply?from=search&newApply=true",
+        )
+
+    def test_attach_resume_file_uses_cdp_without_reading_file_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply, "DEFAULT_RESUME_DIR", Path(tmp)):
+            resume = Path(tmp) / "Senior Python CV.pdf"
+            resume.write_bytes(b"")
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name=resume.name,
+                upload_allowed=True,
+            )
+            fake = FakeUploadTab(resume.name)
+            result = apply.attach_resume_file(fake, row)
+            self.assertTrue(result["ok"])
+            self.assertIn(("DOM.setFileInputFiles", {"objectId": "file-input-object", "files": [str(resume)]}), fake.calls)
+
+    def test_attach_resume_file_accepts_visible_filename_even_when_input_files_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply, "DEFAULT_RESUME_DIR", Path(tmp)):
+            resume = Path(tmp) / "Senior Python CV.pdf"
+            resume.write_bytes(b"")
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name=resume.name,
+                upload_allowed=True,
+            )
+            fake = FakeVisibleUploadTab(resume.name)
+
+            result = apply.attach_resume_file(fake, row)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["verify"]["visibleFileName"])
+
+    def test_attach_resume_file_falls_back_to_file_chooser_when_direct_set_does_not_stick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply, "DEFAULT_RESUME_DIR", Path(tmp)):
+            resume = Path(tmp) / "Senior Python CV.pdf"
+            resume.write_bytes(b"")
+            row = approved_row(
+                resume_policy="upload_exact_resume",
+                approved_resume_name=resume.name,
+                upload_allowed=True,
+            )
+            fake = FakeChooserFallbackUploadTab(resume.name)
+
+            result = apply.attach_resume_file(fake, row)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["chooser"]["ok"])
+            self.assertIn(("DOM.setFileInputFiles", {"backendNodeId": 777, "files": [str(resume)]}), fake.calls)
+
+    def test_no_resume_policy_blocks_when_apply_page_requires_resume_method(self) -> None:
+        fake = FakePolicyRequiresResumeTab()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(apply.time, "sleep", lambda _seconds: None):
+            log = Path(tmp) / "attempts.jsonl"
+            rc = apply.process_row(
+                approved_row(resume_policy="no_resume", approved_resume_name="", upload_allowed=False),
+                "http://127.0.0.1:9222",
+                "pre_submit",
+                log,
+                0,
+                tab_factory=lambda _endpoint, _url: fake,
+            )
+            self.assertEqual(rc, 3)
+            self.assertTrue(fake.closed)
+            event = json.loads(log.read_text(encoding="utf-8").strip())
+            self.assertEqual(event["result"], "blocked_policy_requires_resume")
+
+    def test_upload_policy_can_select_attach_resume_apply_method(self) -> None:
+        row = approved_row(resume_policy="upload_exact_resume", approved_resume_name="Senior Python CV.pdf", upload_allowed=True)
+        result = apply.open_application_form(FakeApplyMethodTab(), row)
+        self.assertEqual(result["reason"], "attach-resume method selected")
+
+    def test_cover_letter_opener_is_detected_before_fill(self) -> None:
+        result = apply.open_cover_letter(FakeCoverLetterTab())
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["opened"])
+
+    def test_exact_cover_letter_selector_is_used_first(self) -> None:
+        result = apply.open_cover_letter(FakeExactCoverLetterTab())
+        self.assertEqual(result["selector"], apply.ROBOTAU_COVER_LETTER_SELECTOR)
+
+    def test_fill_form_uses_exact_cover_letter_selector(self) -> None:
+        result = apply.fill_form(FakeFillCoverSelectorTab(), approved_row())
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["coverLetterSelectorUsed"])
+
+    def test_final_send_uses_exact_selector_first(self) -> None:
+        result = apply.submit_form(FakeExactSubmitTab())
+        self.assertTrue(result["submitted"])
+        self.assertEqual(result["selector"], apply.ROBOTAU_FINAL_SEND_SELECTOR)
 
     def test_dry_run_writes_audit_log_without_browser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

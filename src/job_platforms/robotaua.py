@@ -42,6 +42,12 @@ FIT_KEYWORDS = {
     "gcp": "cloud",
     "azure": "cloud",
 }
+ROLE_TITLE_RE = re.compile(
+    r"^(?P<title>.+?\b(?:AI Engineer|Python Engineer|Backend Engineer|Full-Stack Developer|Full Stack Developer|"
+    r"Software Engineer|Automation Developer|Integration Engineer|Data Engineer|ML Engineer|Developer|Engineer)\b"
+    r"(?:\s*\([^)]+\))?)",
+    re.I,
+)
 
 
 PIPELINE_GATES = [
@@ -61,6 +67,18 @@ TERMINAL_STATUSES = {"submitted", "submitted_success", "already_applied", "manua
 def _clean_text(value: Any, limit: int = 1200) -> str:
     text = re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip()
     return text[:limit]
+
+
+def _clean_role_title(value: Any, limit: int = 180) -> str:
+    text = _clean_text(value, limit=500)
+    match = ROLE_TITLE_RE.match(text)
+    if match:
+        text = match.group("title")
+    text = re.split(r"\s+(?:Київ|Львів|Remote|Віддалено|Україна|Ukraine)\b", text, maxsplit=1, flags=re.I)[0]
+    words = text.strip(" -|,").split()
+    if len(words) > 8:
+        text = " ".join(words[:8])
+    return text.strip(" -|,")[:limit]
 
 
 def _dedupe_keep_order(values: list[str]) -> tuple[str, ...]:
@@ -218,7 +236,7 @@ class RobotaUaAdapter(JobPlatformAdapter):
 
     def normalize_vacancy(self, raw: dict) -> VacancyObservation:
         source_url = self.normalize_url(str(raw.get("source_url", "")))
-        title = _clean_text(raw.get("title"), limit=180)
+        title = _clean_role_title(raw.get("title"), limit=180)
         if not title:
             raise ValueError("Robota.ua vacancy requires a public title")
         company = _clean_text(raw.get("company"), limit=180)

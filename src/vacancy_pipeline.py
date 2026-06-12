@@ -2,19 +2,41 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 from job_apply_config import ROOT, settings
+from job_platforms.dou import is_exact_dou_vacancy_url
 from resume_index import list_resumes
+from shared_job_db import DEFAULT_DB_PATH, fetch_progress_rows
 
 
 DEFAULT_LINKEDIN = "https://www.linkedin.com/in/taras-prystavskyj/"
 DEFAULT_SALARY_USD = 3000
+BANNED_DRAFT_PHRASES = [
+    "I would position",
+    "I should be transparent",
+    "team team",
+    ".pdf",
+    ".doc",
+    "Stanislav_Shcherbak",
+    "review artifacts",
+    "diffs",
+    "scoped tool use",
+    "tool orchestration",
+]
+ROLE_TITLE_RE = re.compile(
+    r"^(?P<title>.+?\b(?:AI Engineer|Python Engineer|Backend Engineer|Full-Stack Developer|Full Stack Developer|"
+    r"Software Engineer|Automation Developer|Integration Engineer|Data Engineer|ML Engineer|Developer|Engineer)\b"
+    r"(?:\s*\([^)]+\))?)",
+    re.I,
+)
 INBOX_OFFERS_PATH = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 SUBMISSION_ATTEMPTS_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
 OBSERVATION_PATHS = [
+    ROOT / "data" / "job_waves" / "dou_observations.jsonl",
     ROOT / "data" / "job_waves" / "wave_2026-06-11_ai_automation_observations.jsonl",
     ROOT / "data" / "job_waves" / "robotaua_observations.jsonl",
 ]
@@ -31,12 +53,55 @@ def latest_observations() -> list[dict[str, Any]]:
                 continue
             row = json.loads(line)
             url = str(row.get("source_url", ""))
+            if str(row.get("source_site", "")).lower() == "dou" and not is_exact_dou_vacancy_url(url):
+                continue
             if url and url in seen_urls:
                 continue
             if url:
                 seen_urls.add(url)
             rows.append(row)
+    for row in latest_shared_db_observations():
+        url = str(row.get("source_url", ""))
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        rows.append(row)
     return rows
+
+
+def latest_shared_db_observations(limit: int = 250) -> list[dict[str, Any]]:
+    try:
+        jobs = fetch_progress_rows(DEFAULT_DB_PATH, limit=limit)["jobs"]
+    except Exception:
+        return []
+    result: list[dict[str, Any]] = []
+    for job in jobs:
+        platform = str(job.get("platform") or "").strip().lower()
+        if platform not in {"workua", "dou", "robotaua", "djinni"}:
+            continue
+        source_url = str(job.get("source_url") or "")
+        if platform == "dou" and not is_exact_dou_vacancy_url(source_url):
+            continue
+        result.append(
+            {
+                "source_site": platform,
+                "source_url": source_url,
+                "title": job.get("title", ""),
+                "company": job.get("company", ""),
+                "location": job.get("location", ""),
+                "summary": job.get("summary", ""),
+                "requirements": job.get("requirements") or [],
+                "fit_tags": job.get("fit_tags") or [],
+                "risk_flags": job.get("risk_flags") or [],
+                "salary_hint": job.get("salary_hint", ""),
+                "published_hint": job.get("published_hint", ""),
+                "status": job.get("status", ""),
+                "score": str(job.get("score") or ""),
+                "source_type": "shared_db_vacancy",
+            }
+        )
+    return result
 
 
 def latest_inbox_offers() -> list[dict[str, Any]]:
@@ -72,7 +137,8 @@ def is_actionable_inbox_offer(row: dict[str, Any]) -> bool:
         "дякуємо за вашу заявку",
         "already applied",
     ]
-    if any(token in text for token in system_tokens):
+    self_reply_tokens = ["ви:", "you:", "relevant resume:", "best regards", "taras prystavskyj"]
+    if any(token in text for token in [*system_tokens, *self_reply_tokens]):
         return False
     return row.get("recommendation") in {"digest", "review"}
 
@@ -180,24 +246,86 @@ def resume_match_score(resume: dict[str, Any], vacancy_text: str) -> int:
     return score
 
 
+def clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def clean_role_title(vacancy: dict[str, Any]) -> str:
+    raw = clean_text(vacancy.get("title"))
+    if not raw:
+        return "Python AI Engineer"
+    company = clean_text(vacancy.get("company"))
+    if company and company.lower() in raw.lower():
+        raw = re.split(re.escape(company), raw, maxsplit=1, flags=re.I)[0].strip(" -|,")
+    match = ROLE_TITLE_RE.match(raw)
+    if match:
+        raw = match.group("title")
+    raw = re.split(r"\s+(?:Київ|Львів|Remote|Віддалено|Україна|Ukraine)\b", raw, maxsplit=1, flags=re.I)[0].strip(" -|,")
+    words = raw.split()
+    if len(words) > 8:
+        raw = " ".join(words[:8]).strip(" -|,")
+    return raw or "Python AI Engineer"
+
+
+def salutation(company: Any) -> str:
+    name = clean_text(company)
+    if not name or name.lower() == "team":
+        return "Hi,"
+    return f"Hi {name} team,"
+
+
+def human_fit_tags(vacancy: dict[str, Any]) -> str:
+    ignored_tags = {"apply_candidate", "review", "digest", "low_priority"}
+    tags = [clean_text(tag) for tag in (vacancy.get("fit_tags") or []) if clean_text(tag)]
+    clean_tags = []
+    for tag in tags[:4]:
+        if tag.lower() in ignored_tags:
+            continue
+        tag = tag.replace("-", " ")
+        if tag.lower() == "ai":
+            tag = "AI engineering"
+        elif tag.lower() == "llm":
+            tag = "LLM workflows"
+        elif tag.lower() == "rag":
+            tag = "RAG systems"
+        elif tag.lower() == "python":
+            tag = "Python"
+        clean_tags.append(tag)
+    return ", ".join(clean_tags) or "Python, AI automation, and reliable backend engineering"
+
+
+def draft_quality_errors(message: str) -> list[str]:
+    errors = []
+    low = message.lower()
+    for phrase in BANNED_DRAFT_PHRASES:
+        if phrase.lower() in low:
+            errors.append(f"banned phrase: {phrase}")
+    if re.search(r"\byour\s+.{90,}\s+role\b", message, re.I | re.S):
+        errors.append("role title looks contaminated by description text")
+    if re.search(r"\b[A-Z][A-Za-z_]+\.pdf\b", message):
+        errors.append("resume file name leaked into message")
+    return errors
+
+
 def draft_cover_letter(vacancy: dict[str, Any], resume: dict[str, Any] | None) -> str:
-    company = vacancy.get("company") or "team"
-    title = vacancy.get("title") or "this role"
-    fit = ", ".join((vacancy.get("fit_tags") or [])[:5]) or "Python and AI automation"
-    resume_note = f" I would position the most relevant resume as {resume['name']}." if resume else ""
+    title = clean_role_title(vacancy)
+    fit = human_fit_tags(vacancy)
     location_note = f"\n\nLocation preference: {settings().location_preferences}."
-    return (
-        f"Hi {company} team,\n\n"
-        f"I am interested in your {title} role because it matches my current focus: practical Python-based AI automation, "
-        f"LLM-assisted workflows, and reliable engineering systems.\n\n"
-        f"My background combines 15+ years of software delivery and technical leadership with recent hands-on work in "
-        f"multi-agent workflows, review artifacts, logs, tests, diffs, and scoped tool use. The strongest fit signals I see are: {fit}."
-        f"{resume_note}{location_note}\n\n"
-        "I should be transparent that I have worked independently and in small-team/founder-style environments for many years, "
-        "so I would align carefully with your team process and delivery expectations. I bring ownership, fast execution, and "
-        "product/architecture judgment.\n\n"
+    message = (
+        f"{salutation(vacancy.get('company'))}\n\n"
+        f"I am interested in the \"{title}\" role because it matches my current focus: practical Python-based AI automation, "
+        "LLM-assisted workflows, and reliable engineering systems.\n\n"
+        "My background combines 15+ years of software delivery and technical leadership with recent hands-on work in "
+        f"Python automation, AI integrations, workflow reliability, and testing discipline. The strongest fit signals are: {fit}."
+        f"{location_note}\n\n"
+        "For the last years I have worked mostly in independent and small-team/founder-style environments. I adapt deliberately "
+        "to each team's delivery process and bring ownership, fast execution, and product/architecture judgment.\n\n"
         "Best regards,\nTaras Prystavskyj"
     )
+    errors = draft_quality_errors(message)
+    if errors:
+        raise ValueError(f"draft cover letter failed quality gate: {'; '.join(errors)}")
+    return message
 
 
 def build_candidate_batch(limit: int = 10, output: Path | None = None) -> Path:
@@ -273,17 +401,19 @@ def batch_score(row: dict[str, Any]) -> int:
 
 
 def draft_inbox_reply(vacancy: dict[str, Any], resume: dict[str, Any] | None) -> str:
-    company = vacancy.get("company") or "team"
-    title = vacancy.get("title") or "your opportunity"
-    resume_note = f" Relevant resume: {resume['name']}." if resume else ""
-    return (
-        f"Hi {company},\n\n"
-        f"Thank you for reaching out about {title}. The opportunity looks relevant to my Python, AI automation, "
-        f"LLM workflow, and engineering ownership background.{resume_note}\n\n"
+    title = clean_role_title(vacancy) if vacancy.get("title") else "your opportunity"
+    message = (
+        f"{salutation(vacancy.get('company'))}\n\n"
+        f"Thank you for reaching out about the \"{title}\" role. The opportunity looks relevant to my Python, AI automation, "
+        "LLM workflow, and engineering ownership background.\n\n"
         f"My current preferences are: {settings().location_preferences}. Expected compensation can be discussed around "
         f"{DEFAULT_SALARY_USD} USD depending on scope and format.\n\n"
         "Best regards,\nTaras Prystavskyj"
     )
+    errors = draft_quality_errors(message)
+    if errors:
+        raise ValueError(f"draft inbox reply failed quality gate: {'; '.join(errors)}")
+    return message
 
 
 def candidate_summary(csv_path: Path) -> list[dict[str, str]]:

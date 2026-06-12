@@ -49,6 +49,43 @@ require explicit owner approval even if a draft is generated.
   explicitly provides them for this task.
 - Do not run tight polling loops. Prefer official alerts/feeds where available,
   and otherwise use low-rate browser checks with jitter and backoff.
+- Do not send outbound cover letters or recruiter replies that contain another
+  person's name, filename-like resume references such as `.pdf` or `.doc`, or
+  known contamination such as `Stanislav_Shcherbak`.
+- Do not send internal/agentic phrasing in candidate-facing messages, including
+  "review artifacts", "diffs", "scoped tool use", "I would position",
+  "I should be transparent", or `Relevant resume: <filename>`.
+- Do not send unsanitized job titles. Quote or rephrase titles before use, and
+  block or clean titles contaminated with company, location, or description
+  text.
+
+## Outbound Message QA
+
+Before final submit/send, scan the exact outbound message text and fail closed
+when any prohibited name, resume filename reference, internal/agentic phrase, or
+contaminated job title remains. Salutations must not duplicate words such as
+"team team"; when company is empty use `Hi,` or `Hi hiring team,`.
+
+If this QA fails, do not send. Write a blocker artifact that includes the failed
+patterns and offers manual edit or safe auto-clean options.
+
+## Proactive Live Blocker Rule
+
+Live-capable platform agents must not stop at a first blocker when a bounded
+safe remediation is available. They must classify the blocker, attempt one safe
+non-mutating fix, and re-run dry-run or pre-submit validation before reporting
+failure. Examples:
+
+- Convert public search/listing URLs into exact vacancy URLs by parsing visible
+  public links.
+- Try documented application URL variants such as `/apply?newApply=true` when
+  the public vacancy page has no visible apply form.
+- Update selectors when the visible page markup changed.
+- Surface profile/login/validation blockers with a concrete human action link.
+
+This rule never weakens approval gates. Final submit/send, profile/account
+changes, rejection actions, and resume uploads still require exact owner
+approval for the target row and action.
 
 ## First Implementation Shape
 

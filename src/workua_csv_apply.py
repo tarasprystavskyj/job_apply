@@ -46,6 +46,7 @@ DEFAULT_LOG = ROOT / "data" / "job_waves" / "workua_submission_attempts.jsonl"
 TRUTHY = {"1", "true", "yes", "y", "allowed", "approve", "approved"}
 RESUME_POLICIES = {"no_upload", "no_resume", "use_workua_profile", "use_selected_resume", "upload_resume"}
 LINKEDIN_POLICIES = {"no_linkedin", "include_in_message", "fill_field"}
+MESSAGE_POLICIES = {"exact_message", "profile_resume_only"}
 
 
 @dataclass(frozen=True)
@@ -61,8 +62,14 @@ class WorkUaApplicationRow:
     linkedin: str
     approved_resume_name: str
     upload_allowed: bool
+    message_policy: str
+    profile_resume_only_allowed: bool
     approved_to_submit: bool
     final_submit_allowed: bool
+
+    @property
+    def allows_profile_resume_only(self) -> bool:
+        return self.message_policy == "profile_resume_only" and self.profile_resume_only_allowed
 
 
 def truthy(value: str | None) -> bool:
@@ -104,6 +111,8 @@ def read_rows(csv_path: Path) -> list[WorkUaApplicationRow]:
                     linkedin=(row.get("linkedin") or "").strip(),
                     approved_resume_name=(row.get("approved_resume_name") or "").strip(),
                     upload_allowed=truthy(row.get("upload_allowed")),
+                    message_policy=(row.get("message_policy") or "exact_message").strip().lower(),
+                    profile_resume_only_allowed=truthy(row.get("profile_resume_only_allowed")),
                     approved_to_submit=truthy(row.get("approved_to_submit")),
                     final_submit_allowed=truthy(row.get("final_submit_allowed")),
                 )
@@ -119,6 +128,17 @@ def validate_row(row: WorkUaApplicationRow, live_action: bool) -> list[str]:
         errors.append("url must be a public Work.ua vacancy URL")
     if not row.message:
         errors.append("message is required and must be exact row data")
+    if row.message_policy not in MESSAGE_POLICIES:
+        errors.append(f"message_policy must be one of: {', '.join(sorted(MESSAGE_POLICIES))}")
+    if row.message_policy != "profile_resume_only" and row.profile_resume_only_allowed:
+        errors.append("profile_resume_only_allowed=true is only valid with message_policy=profile_resume_only")
+    if row.message_policy == "profile_resume_only":
+        if not row.profile_resume_only_allowed:
+            errors.append("profile_resume_only_allowed=true is required when message_policy=profile_resume_only")
+        if row.linkedin_policy != "no_linkedin":
+            errors.append("profile_resume_only requires linkedin_policy=no_linkedin because no message/linkedin field is filled")
+        if row.resume_policy not in {"use_workua_profile", "use_selected_resume"}:
+            errors.append("profile_resume_only requires resume_policy=use_workua_profile or use_selected_resume")
     if row.resume_policy not in RESUME_POLICIES:
         errors.append(f"resume_policy must be one of: {', '.join(sorted(RESUME_POLICIES))}")
     if row.linkedin_policy not in LINKEDIN_POLICIES:
@@ -251,7 +271,7 @@ def navigate_to_apply_form(tab: CdpTab) -> dict[str, Any]:
       form.querySelector("textarea,input[type=email],input[type=tel],input[type=file]"));
   if (hasUsefulForm()) return {ok: true, navigated: false, reason: "application-like form already visible"};
 
-  const candidates = Array.from(document.querySelectorAll("a[href]"))
+  const linkCandidates = Array.from(document.querySelectorAll("a[href]"))
     .filter(visible)
     .map(a => ({
       href: a.href,
@@ -263,9 +283,36 @@ def navigate_to_apply_form(tab: CdpTab) -> dict[str, Any]:
         low.includes("apply") ||
         low.includes("\u0432\u0456\u0434\u0433\u0443\u043a");
     });
-  if (!candidates.length) return {ok: false, reason: "no safe apply navigation link"};
-  location.href = candidates[0].href;
-  return {ok: true, navigated: true, href: candidates[0].href, text: candidates[0].text.slice(0, 120)};
+  if (linkCandidates.length) {
+    location.href = linkCandidates[0].href;
+    return {ok: true, navigated: true, href: linkCandidates[0].href, text: linkCandidates[0].text.slice(0, 120)};
+  }
+  const buttonCandidates = Array.from(document.querySelectorAll("button,input[type=button]"))
+    .filter(visible)
+    .filter(button => {
+      if (button.closest("form") && hasUsefulForm()) return false;
+      const text = (button.innerText || button.value || button.getAttribute("aria-label") || "").trim().toLowerCase();
+      return text.includes("apply") || text.includes("\u0432\u0456\u0434\u0433\u0443\u043a");
+    });
+  if (!buttonCandidates.length) return {ok: false, reason: "no safe apply navigation control"};
+  const picked = buttonCandidates.find(button => button.getAttribute("data-open-react-send-resume-modal")) || buttonCandidates[0];
+  picked.scrollIntoView({block: "center"});
+  if (picked.getAttribute("data-open-react-send-resume-modal") && typeof window.reactHandleOpenSendResumeModal === "function") {
+    const event = new MouseEvent("click", {bubbles: true, cancelable: true, view: window});
+    Object.defineProperty(event, "target", {value: picked, enumerable: true});
+    window.reactHandleOpenSendResumeModal(event);
+  } else if (picked.getAttribute("data-open-react-send-resume-modal")) {
+    return {ok: false, reason: "Work.ua React apply modal handler is not ready"};
+  } else {
+    picked.click();
+  }
+  return {
+    ok: true,
+    navigated: false,
+    clicked: true,
+    text: (picked.innerText || picked.value || "").trim().slice(0, 120),
+    openedReactModal: location.href.includes("modal=send-resume")
+  };
 })()
 """
     )
@@ -279,7 +326,9 @@ def fill_form(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, Any]:
     linkedin: {json.dumps(row.linkedin)},
     linkedinPolicy: {json.dumps(row.linkedin_policy)},
     resumePolicy: {json.dumps(row.resume_policy)},
-    approvedResumeName: {json.dumps(row.approved_resume_name)}
+    approvedResumeName: {json.dumps(row.approved_resume_name)},
+    messagePolicy: {json.dumps(row.message_policy)},
+    profileResumeOnlyAllowed: {json.dumps(row.profile_resume_only_allowed)}
   }};
   const visible = e => {{
     if (!e) return false;
@@ -296,10 +345,13 @@ def fill_form(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, Any]:
     return info.includes("message") || info.includes("letter") || info.includes("comment") ||
       info.includes("\u043b\u0438\u0441\u0442") || info.includes("\u043f\u043e\u0432\u0456\u0434");
   }}) || textareas[0];
-  if (!messageField) return {{ok: false, reason: "no visible message textarea"}};
-  messageField.value = expected.message;
-  messageField.dispatchEvent(new Event("input", {{bubbles: true}}));
-  messageField.dispatchEvent(new Event("change", {{bubbles: true}}));
+  const profileResumeOnly = expected.messagePolicy === "profile_resume_only" && expected.profileResumeOnlyAllowed;
+  if (!messageField && !profileResumeOnly) return {{ok: false, reason: "no visible message textarea"}};
+  if (messageField) {{
+    messageField.value = expected.message;
+    messageField.dispatchEvent(new Event("input", {{bubbles: true}}));
+    messageField.dispatchEvent(new Event("change", {{bubbles: true}}));
+  }}
 
   let linkedinFilled = false;
   if (expected.linkedinPolicy === "fill_field") {{
@@ -339,7 +391,9 @@ def fill_form(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, Any]:
 
   return {{
     ok: true,
-    messageLength: messageField.value.length,
+    messageLength: messageField ? messageField.value.length : 0,
+    profileResumeOnly,
+    textareas: textareas.length,
     linkedinFilled,
     fileInputCount: fileInputs.length,
     fileInputsWithFiles,
@@ -358,7 +412,9 @@ def validate_before_submit(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, 
     linkedin: {json.dumps(row.linkedin)},
     linkedinPolicy: {json.dumps(row.linkedin_policy)},
     resumePolicy: {json.dumps(row.resume_policy)},
-    approvedResumeName: {json.dumps(row.approved_resume_name)}
+    approvedResumeName: {json.dumps(row.approved_resume_name)},
+    messagePolicy: {json.dumps(row.message_policy)},
+    profileResumeOnlyAllowed: {json.dumps(row.profile_resume_only_allowed)}
   }};
   const visible = e => {{
     if (!e) return false;
@@ -375,7 +431,15 @@ def validate_before_submit(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, 
   const textareas = Array.from(form.querySelectorAll("textarea")).filter(visible);
   const messageMatches = textareas.some(t => norm(t.value) === norm(expected.message));
   details.messageLength = expected.message.length;
-  if (!messageMatches) errors.push("exact approved message was not transmitted to a visible textarea");
+  details.textareaCount = textareas.length;
+  details.profileResumeOnly = expected.messagePolicy === "profile_resume_only" && expected.profileResumeOnlyAllowed;
+  if (!messageMatches) {{
+    if (textareas.length === 0 && details.profileResumeOnly) {{
+      details.messageSkippedByPolicy = true;
+    }} else {{
+      errors.push("exact approved message was not transmitted to a visible textarea");
+    }}
+  }}
 
   if (expected.linkedinPolicy === "include_in_message" && !expected.message.includes(expected.linkedin)) {{
     errors.push("linkedin_policy=include_in_message but approved message does not contain linkedin");
@@ -471,6 +535,8 @@ def base_event(row: WorkUaApplicationRow, live_action: bool, execute: bool) -> d
         "message_length": len(row.message),
         "resume_policy": row.resume_policy,
         "linkedin_policy": row.linkedin_policy,
+        "message_policy": row.message_policy,
+        "profile_resume_only_allowed": row.profile_resume_only_allowed,
         "linkedin_present": bool(row.linkedin),
         "approved_resume_name_present": bool(row.approved_resume_name),
         "upload_allowed": row.upload_allowed,
@@ -511,6 +577,9 @@ def process_row(
             return 0
 
         navigation = navigate_to_apply_form(tab)
+        if not navigation.get("ok") and navigation.get("reason") == "Work.ua React apply modal handler is not ready":
+            time.sleep(max(delay, 2.0))
+            navigation = navigate_to_apply_form(tab)
         time.sleep(max(delay, 1.0))
         if not navigation.get("ok"):
             state = inspect_state(tab)
@@ -520,7 +589,11 @@ def process_row(
 
         filled = fill_form(tab, row)
         if not filled.get("ok"):
-            append_log(log_path, {**event, "result": "blocked_fill_failed", "before": before, "navigation": navigation, "filled": filled})
+            fill_state = inspect_state(tab)
+            append_log(
+                log_path,
+                {**event, "result": "blocked_fill_failed", "before": before, "navigation": navigation, "filled": filled, "state": fill_state},
+            )
             print(f"row {row.row_number}: fill failed: {filled.get('reason')}")
             return 4
 
@@ -538,7 +611,14 @@ def process_row(
         submitted = submit_form(tab)
         time.sleep(max(delay, 2.0))
         after = inspect_state(tab)
-        success = bool(after.get("already_applied"))
+        after_url = str(after.get("url", ""))
+        after_title = str(after.get("title", "")).lower()
+        success = bool(
+            after.get("already_applied")
+            or "/jobseeker/my/resumes/sent/" in after_url
+            or "відгук надісл" in after_title
+            or "sent" in after_title
+        )
         result = "submitted_success" if success else "submit_clicked_unconfirmed"
         append_log(log_path, {**event, "result": result, "before": before, "navigation": navigation, "filled": filled, "presubmit": presubmit, "submitted": submitted, "after": after})
         print(f"row {row.row_number}: {result}: {row.url}")

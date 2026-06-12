@@ -214,6 +214,32 @@ Rows for non-Djinni sites are ignored by the Djinni submitter and need separate
 site-specific flows. `site=djinni_inbox` rows are also ignored by the submitter
 and are intended for review/reply/reject decisions only.
 
+## Work.ua Resume Update
+
+Generic guarded Work.ua resume edit prepare/save lives in
+`src\workua_resume_update.py`. It accepts an exact Work.ua resume edit URL plus
+exact approved field updates from JSON/CSV. Dry-run is the default and does not
+open a browser:
+
+```powershell
+python src\workua_resume_update.py --json path\to\workua_resume_update.json
+```
+
+Browser prepare fills approved fields through Chrome CDP and stops before save:
+
+```powershell
+python src\workua_resume_update.py --json path\to\workua_resume_update.json --prepare-browser --i-understand-this-prepares-workua-resume-update
+```
+
+Final save additionally requires `final_save_allowed=true` in the config and:
+
+```powershell
+python src\workua_resume_update.py --json path\to\workua_resume_update.json --execute-save --i-understand-this-prepares-workua-resume-update --i-understand-this-saves-workua-resume-update
+```
+
+The attempt log stores field value lengths and SHA-256 digests, not full resume
+text.
+
 ## Robota.ua CSV Submitter
 
 Validation-only:

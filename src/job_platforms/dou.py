@@ -89,6 +89,44 @@ def _absolute_url(base_url: str, href: str) -> str:
     return urllib.parse.urljoin(base_url or "https://jobs.dou.ua/", href)
 
 
+def is_dou_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and host in {"dou.ua", "jobs.dou.ua", "relocate.dou.ua"}
+
+
+def is_exact_dou_vacancy_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "https"
+        and host in {"dou.ua", "jobs.dou.ua", "relocate.dou.ua"}
+        and bool(re.search(r"/vacancies/\d+/?$", parsed.path))
+    )
+
+
+def is_dou_listing_url(url: str) -> bool:
+    if not is_dou_url(url) or is_exact_dou_vacancy_url(url):
+        return False
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip("/")
+    return path in {"/vacancies", "/jobs"} or "/vacancies/" not in path
+
+
+def exact_dou_vacancy_observations(observations: list[VacancyObservation]) -> list[VacancyObservation]:
+    exact: list[VacancyObservation] = []
+    seen: set[str] = set()
+    for observation in observations:
+        if not is_exact_dou_vacancy_url(observation.source_url):
+            continue
+        key = observation.source_url.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        exact.append(observation)
+    return exact
+
+
 def _json_value(value: Any) -> str:
     if isinstance(value, str):
         return _clean_text(value)
@@ -173,12 +211,13 @@ class _DouVacancyParser(HTMLParser):
 
         if self._current is not None:
             if low_tag == "a" and href:
-                if "vt" in classes or "/vacancies/" in href:
-                    self._current["source_url"] = _absolute_url(self.base_url, href)
-                    self._field = "title"
-                    return
+                absolute = _absolute_url(self.base_url, href)
                 if "company" in classes:
                     self._field = "company"
+                    return
+                if "vt" in classes or is_exact_dou_vacancy_url(absolute):
+                    self._current["source_url"] = absolute
+                    self._field = "title"
                     return
             if low_tag in {"span", "div"} and classes & {"cities", "place"}:
                 self._field = "location"
@@ -193,8 +232,11 @@ class _DouVacancyParser(HTMLParser):
                 self._field = "published_hint"
                 return
 
-        if self._current is None and low_tag == "a" and href and "/vacancies/" in href:
-            self._fallback_href = _absolute_url(self.base_url, href)
+        if self._current is None and low_tag == "a" and href:
+            absolute = _absolute_url(self.base_url, href)
+            if not is_exact_dou_vacancy_url(absolute):
+                return
+            self._fallback_href = absolute
             self._fallback_text = []
 
     def handle_data(self, data: str) -> None:
