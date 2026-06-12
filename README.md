@@ -1,7 +1,8 @@
 # Job Apply Automation
 
 Local, review-first assistant for finding relevant jobs, drafting tailored
-applications, and submitting only explicitly approved Djinni applications.
+applications, and submitting only explicitly approved Djinni and Robota.ua
+applications.
 
 The project is intentionally conservative:
 
@@ -212,6 +213,32 @@ Required safety columns:
 Rows for non-Djinni sites are ignored by the Djinni submitter and need separate
 site-specific flows. `site=djinni_inbox` rows are also ignored by the submitter
 and are intended for review/reply/reject decisions only.
+
+## Robota.ua CSV Submitter
+
+Validation-only:
+
+```powershell
+python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv
+```
+
+Pre-submit preparation opens/fills the approved vacancy form and stops before
+the final click:
+
+```powershell
+python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --pre-submit --i-understand-this-prepares-robotaua-application
+```
+
+Real submit:
+
+```powershell
+python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --execute --i-understand-this-submits-robotaua-application
+```
+
+Required Robota.ua safety columns include `site=robotaua`, `url`, exact
+`message`, `resume_policy`, `linkedin_policy`, `approved_to_submit=true`,
+`final_submit_allowed=true`, and `upload_allowed`. Resume file uploads are still
+blocked by the current Robota.ua flow.
 
 ## Development Notes
 
