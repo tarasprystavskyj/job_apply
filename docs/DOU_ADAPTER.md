@@ -2,10 +2,15 @@
 
 Created: 2026-06-11
 
-This slice is discovery, normalization, scoring, local drafting, review, manual
-handoff, and status tracking only. It does not log in, inspect cookies, read
-browser profiles, read private resume text, upload files, click apply controls,
-send messages, or change DOU account state.
+This adapter slice is discovery, normalization, scoring, local drafting, review,
+manual handoff, and status tracking only. It does not log in, inspect cookies,
+read browser profiles, read private resume text, upload files, click apply
+controls, send messages, or change DOU account state.
+
+A separate guarded live submitter exists at `src/dou_csv_apply.py`. It attaches
+to an already-running Chrome CDP session and only processes rows that carry all
+row-level approval gates. The registry adapter remains review-only so discovery
+and shared DB flows cannot submit by accident.
 
 ## Safe Scope
 
@@ -50,6 +55,8 @@ progress.
    - Current state is manual handoff.
    - `prepare_application` and `final_submit` fail closed behind the base safety
      gates and raise `UnsupportedAction` after approval.
+   - Live browser sending is only available through `src/dou_csv_apply.py`,
+     with explicit CSV gates and CLI flags.
 
 7. `status_tracking`
    - Shared DB events and statuses provide graph-friendly progress data.
@@ -110,6 +117,59 @@ Artifacts:
 The blocker artifact records that final submit is not implemented and that exact
 owner approval is still required per vacancy, message, resume decision, and any
 future final submit action.
+
+## Guarded Live Submitter
+
+`src/dou_csv_apply.py` supports three safe modes:
+
+```powershell
+python src\dou_csv_apply.py --csv path\to\approved_dou.csv
+```
+
+Validation-only. This reads CSV gate metadata and writes
+`data/job_waves/dou_submission_attempts.jsonl`; it does not open a browser or
+type personal data.
+
+```powershell
+python src\dou_csv_apply.py --csv path\to\approved_dou.csv --prepare --i-understand-this-fills-dou-form
+```
+
+Pre-submit browser preparation. It opens the approved DOU vacancy URL in Chrome
+through CDP, opens the visible application surface, fills the exact approved
+message and approved LinkedIn policy fields when present, validates the visible
+form, logs the result, and stops before final submit.
+
+```powershell
+python src\dou_csv_apply.py --csv path\to\approved_dou.csv --execute --i-understand-this-sends-dou-applications
+```
+
+Final send. This is refused unless the row and CLI gates are present.
+
+Required CSV columns:
+
+- `site=dou`
+- `url`: exact ID-specific `https://jobs.dou.ua/.../vacancies/<id>/` or
+  `https://relocate.dou.ua/.../vacancies/<id>/` URL
+- `message`: exact approved application message text
+- `linkedin_policy`: `omit`, `fill_url`, or `use_site_profile`
+- `linkedin`: required only when `linkedin_policy=fill_url`
+- `resume_policy`: `no_resume`, `use_site_profile_resume`, or `upload_file`
+- `upload_allowed`: must be `false` unless `resume_policy=upload_file`
+- `approved_resume_name`: required only for `resume_policy=upload_file`
+- `approved_to_submit=true`
+- `final_submit_allowed=true`
+
+Resume upload is intentionally blocked in this implementation. Rows with
+`resume_policy=upload_file` must name the exact approved resume and
+`upload_allowed=true`, but the script still returns a validation blocker because
+no safe uploader has been implemented and no resume files are read.
+
+Public smoke without typing or submitting can inspect a broader public
+DOU vacancy/listing URL:
+
+```powershell
+python src\dou_csv_apply.py --public-smoke-url https://jobs.dou.ua/companies/example/vacancies/123/
+```
 
 ## Next Integration Steps
 
