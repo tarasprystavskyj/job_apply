@@ -11,6 +11,7 @@ Implemented entry points:
 - Djinni submitter: `python src\djinni_csv_apply.py`
 - Djinni inbox scanner: `python src\djinni_inbox_scan.py`
 - Robota.ua review-only adapter: `python src\robotaua_pipeline.py`
+- Robota.ua guarded submitter: `python src\robotaua_csv_apply.py`
 
 The `.env` file contains local runtime settings:
 
@@ -53,5 +54,6 @@ drafting agent.
 
 Robota.ua now has a bounded adapter slice for public HTML normalization,
 review-only draft generation, status events, and LangGraph-like progress
-snapshots. It is manual handoff only; there is no Robota.ua submit/upload/apply
-automation.
+snapshots. It also has a separate guarded CSV live path that requires
+row-level approval, exact message text, resume/LinkedIn policy, and an explicit
+CLI guard. Resume file upload remains blocked.

@@ -2,8 +2,10 @@
 
 Created: 2026-06-11
 
-This slice is discovery/draft/status only. It does not log in, inspect cookies,
-read browser profiles, upload resumes, click apply buttons, or submit forms.
+This slice keeps discovery/draft/status review-first and adds a separate guarded
+CSV live path in `src\robotaua_csv_apply.py`. The live path attaches only to an
+already-running Chrome CDP endpoint. It does not inspect cookies, read browser
+profiles, saved passwords, or local CV contents.
 
 ## Pipeline Gates
 
@@ -35,15 +37,28 @@ read browser profiles, upload resumes, click apply buttons, or submit forms.
 5. `review_approval`
    - Review CSV rows use `approved_to_submit=false` and
      `final_submit_allowed=false`.
-   - Owner must approve exact vacancy, resume/profile, message, and final
-     action before any future Robota.ua apply adapter can act.
+   - Review CSV rows include `resume_policy`, `linkedin_policy`, and
+     `upload_allowed` columns so the owner can create a structured live gate.
+   - Owner must approve exact vacancy URL, exact message, resume/LinkedIn
+     policy, `approved_to_submit=true`, and `final_submit_allowed=true` before
+     the live path can prepare or submit a form.
    - Draft and blocker records include this approval text:
      `Approve Robota.ua application draft for exact vacancy URL <url>; resume=<exact resume name>; message=<exact approved message>; final submit allowed=<yes/no>`.
 
-6. `manual_handoff`
-   - Current final state for Robota.ua is manual handoff.
-   - There is no prepare or final submit implementation; adapter methods raise
-     `PermissionError` or `UnsupportedAction`.
+6. `final_gated_apply`
+   - Dry-run validation:
+     `python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv`
+   - Pre-submit browser preparation:
+     `python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --pre-submit --i-understand-this-prepares-robotaua-application`
+   - Final submit:
+     `python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --execute --i-understand-this-submits-robotaua-application`
+   - Final submit clicks are refused unless the row has `site=robotaua`, an
+     HTTPS Robota.ua vacancy URL, exact `message`, `resume_policy`,
+     `linkedin_policy`, `approved_to_submit=true`,
+     `final_submit_allowed=true`, and the explicit CLI guard flag.
+   - Resume file upload remains blocked in this guarded flow. A row may name
+     an exact resume and set `upload_allowed=true`, but
+     `resume_policy=upload_exact_resume` currently stops before upload.
 
 7. `status_tracking`
    - Shared job/outreach/status state is written to
@@ -101,6 +116,25 @@ Build review-only artifacts:
 python src\robotaua_pipeline.py build-review
 ```
 
+Validate an owner-approved Robota.ua live CSV without opening a browser:
+
+```powershell
+python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv
+```
+
+Prepare an approved application in the visible browser session and stop before
+the final click:
+
+```powershell
+python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --pre-submit --i-understand-this-prepares-robotaua-application
+```
+
+Submit only after the same row-level gates plus the final CLI guard:
+
+```powershell
+python src\robotaua_csv_apply.py --csv path\to\approved_robotaua.csv --execute --i-understand-this-submits-robotaua-application
+```
+
 Fetch one public search page, normalize vacancies, create review-only DB drafts,
 and refresh the graph:
 
@@ -119,5 +153,7 @@ python src\robotaua_pipeline.py progress
 - Surface `robotaua_observations.jsonl` rows in the web UI as review-only rows.
 - Extend the shared DB-backed progress renderer to show platform-specific
   `manual_handoff` gates.
-- Implement a prepare-only browser flow only after selectors are reviewed. It
-  must stop before submit/upload and require an exact owner approval gate.
+- Review Robota.ua selectors against a real approved vacancy before first final
+  submit. Use `--pre-submit` first and inspect
+  `data/job_waves/robotaua_submission_attempts.jsonl`.
+- Implement exact-resume file upload only as a separate approval-gated change.
