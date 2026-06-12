@@ -5,21 +5,34 @@ import argparse
 import csv
 import json
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from job_apply_config import ROOT
-from job_platforms import DiscoveryQuery, ProgressEdge, ProgressNode, ProgressSnapshot, ResumeArtifact
-from job_platforms.platforms import RobotaUaAdapter
-from shared_job_db import DEFAULT_DB_PATH, add_outreach_draft, append_event, upsert_job, upsert_resume
-from vacancy_pipeline import DEFAULT_LINKEDIN, DEFAULT_SALARY_USD, score_vacancy
+from job_platforms import DiscoveryQuery, ProgressEdge, ProgressNode, ProgressSnapshot
+from job_platforms.robotaua import (
+    RobotaUaAdapter,
+    build_robotaua_progress_snapshot,
+    create_robotaua_review_draft,
+    default_resume_artifact,
+    persist_robotaua_observation,
+    robotaua_observation_score,
+    snapshot_to_dict,
+)
+from shared_job_db import DEFAULT_DB_PATH, append_event, upsert_resume
+from vacancy_pipeline import DEFAULT_LINKEDIN, DEFAULT_SALARY_USD
 
 
 ROBOTA_OBSERVATIONS_PATH = ROOT / "data" / "job_waves" / "robotaua_observations.jsonl"
 ROBOTA_OUTREACH_DRAFTS_PATH = ROOT / "data" / "job_waves" / "robotaua_outreach_drafts.jsonl"
 ROBOTA_STATUS_EVENTS_PATH = ROOT / "data" / "job_waves" / "robotaua_status_events.jsonl"
+ROBOTA_BLOCKERS_PATH = ROOT / "data" / "job_waves" / "robotaua_blockers.jsonl"
 ROBOTA_REVIEW_QUEUE_PATH = ROOT / "data" / "job_waves" / f"robotaua_review_queue_{time.strftime('%Y%m%d_%H%M%S')}.csv"
 ROBOTA_PROGRESS_SNAPSHOT_PATH = ROOT / "data" / "job_waves" / "robotaua_progress_snapshot.json"
+ROBOTA_FETCH_DIR = ROOT / "data" / "job_waves" / "robotaua_public_pages"
 
 
 PIPELINE_STAGES = [
@@ -61,20 +74,7 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def observation_score(row: dict[str, Any]) -> int:
-    score = score_vacancy(row)
-    text = " ".join(
-        [
-            str(row.get("title", "")),
-            str(row.get("company", "")),
-            str(row.get("summary", "")),
-            str(row.get("location", "")),
-        ]
-    ).lower()
-    if "remote" in text or "віддал" in text:
-        score += 2
-    if "manual_handoff_only" in [str(x) for x in row.get("risk_flags") or []]:
-        score -= 1
-    return score
+    return robotaua_observation_score(row)
 
 
 def status_event(stage: str, status: str, message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -89,11 +89,57 @@ def status_event(stage: str, status: str, message: str, data: dict[str, Any] | N
     }
 
 
-def default_resume_artifact() -> ResumeArtifact:
-    # This intentionally anticipates the shared resume DB without reading
-    # data/private/resume_index.json, because that file can contain private CV
-    # excerpts. Owner review can later replace this metadata-only handle.
-    return ResumeArtifact(display_name="owner_selected_resume_metadata_pending", status="needs_owner_review")
+def assert_public_robotaua_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"refusing non-https Robota.ua URL: {url}")
+    host = (parsed.hostname or "").lower()
+    if host not in {"robota.ua", "www.robota.ua"}:
+        raise ValueError(f"refusing non-Robota.ua URL: {url}")
+    if not parsed.path.startswith("/zapros/"):
+        raise ValueError(f"live fetch is limited to public Robota.ua search pages: {url}")
+
+
+def fetch_public_search_page(url: str, timeout: float = 15.0, max_bytes: int = 2_000_000) -> str:
+    assert_public_robotaua_url(url)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "job-apply-automation/robotaua-readonly-smoke (+public search only)",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"Robota.ua public page exceeded max_bytes={max_bytes}")
+    return body.decode(charset, errors="replace")
+
+
+def write_blocker(
+    blocker_path: Path,
+    stage: str,
+    reason: str,
+    source_url: str = "",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    blocker = {
+        "schema": "job.platform_blocker.v0",
+        "platform": "robotaua",
+        "stage": stage,
+        "reason": reason,
+        "source_url": source_url,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "approval_request_text": (
+            "Approve Robota.ua application draft for exact vacancy URL <url>; "
+            "resume=<exact resume name>; message=<exact approved message>; final submit allowed=<yes/no>"
+        ),
+        "data": data or {},
+    }
+    write_jsonl(blocker_path, [blocker], append=True)
+    return blocker
 
 
 def normalize_html(
@@ -105,12 +151,32 @@ def normalize_html(
     db_path: Path = DEFAULT_DB_PATH,
     status_path: Path = ROBOTA_STATUS_EVENTS_PATH,
 ) -> dict[str, Any]:
+    return normalize_markup(
+        html_path.read_text(encoding="utf-8", errors="replace"),
+        source_url,
+        query_text,
+        output,
+        append=append,
+        db_path=db_path,
+        status_path=status_path,
+    )
+
+
+def normalize_markup(
+    markup: str,
+    source_url: str,
+    query_text: str,
+    output: Path,
+    append: bool = False,
+    db_path: Path = DEFAULT_DB_PATH,
+    status_path: Path = ROBOTA_STATUS_EVENTS_PATH,
+) -> dict[str, Any]:
     adapter = RobotaUaAdapter()
     query = DiscoveryQuery(text=query_text or "Python AI")
-    observations = adapter.extract_public_vacancies(html_path.read_text(encoding="utf-8", errors="replace"), source_url, query)
+    observations = adapter.extract_public_vacancies(markup, source_url, query)
     rows = [observation.to_artifact() for observation in observations]
     write_jsonl(output, rows, append=append)
-    job_ids = [upsert_job(observation, score=observation_score(observation.to_artifact()), db_path=db_path) for observation in observations]
+    job_ids = [persist_robotaua_observation(observation, db_path=db_path) for observation in observations]
     event = status_event(
         "normalize",
         "complete",
@@ -165,12 +231,16 @@ def build_review_queue(
         writer.writeheader()
         for row in ranked:
             vacancy = adapter.normalize_vacancy(row)
-            job_id = upsert_job(vacancy, score=observation_score(row), db_path=db_path)
+            job_id = persist_robotaua_observation(vacancy, db_path=db_path)
             draft = adapter.draft_outreach(vacancy, resume)
-            outreach_ids.append(add_outreach_draft(job_id, draft, resume_id=resume_id, db_path=db_path))
+            outreach_ids.append(create_robotaua_review_draft(vacancy, job_id, resume=resume, resume_id=resume_id, db_path=db_path))
             draft_artifact = draft.to_artifact()
             draft_artifact["score"] = observation_score(row)
             draft_artifact["manual_handoff_required"] = True
+            draft_artifact["approval_request_text"] = (
+                f"Approve Robota.ua application draft for exact vacancy URL {vacancy.source_url}; "
+                "resume=<exact resume name>; message=<exact approved message>; final submit allowed=<yes/no>"
+            )
             drafts.append(draft_artifact)
             writer.writerow(
                 {
@@ -204,14 +274,106 @@ def build_review_queue(
     )
     write_jsonl(status_path, [event], append=True)
     append_event("robotaua_review_queue_built", "robotaua", status="needs_owner_review", payload=event, db_path=db_path)
-    snapshot = build_progress_snapshot(observations_path, drafts_path, status_path)
-    write_json(progress_path, snapshot.to_dict())
+    snapshot = build_robotaua_progress_snapshot(db_path=db_path)
+    write_json(progress_path, snapshot_to_dict(snapshot))
     return {
         "rows": len(drafts),
         "review_csv": str(review_csv_path),
         "drafts": str(drafts_path),
         "progress": str(progress_path),
         "status_event": event,
+    }
+
+
+def run_once(
+    query_text: str,
+    location: str,
+    limit: int,
+    max_pages: int,
+    delay_seconds: float,
+    output: Path,
+    drafts_path: Path,
+    review_csv_path: Path,
+    progress_path: Path,
+    fetch_dir: Path,
+    db_path: Path = DEFAULT_DB_PATH,
+    status_path: Path = ROBOTA_STATUS_EVENTS_PATH,
+    blocker_path: Path = ROBOTA_BLOCKERS_PATH,
+) -> dict[str, Any]:
+    adapter = RobotaUaAdapter()
+    urls = adapter.discovery_urls(DiscoveryQuery(text=query_text, location=location, limit=limit))[:max_pages]
+    if not urls:
+        raise ValueError("no Robota.ua public discovery URLs generated")
+
+    fetch_dir.mkdir(parents=True, exist_ok=True)
+    total_observations = 0
+    fetched_pages: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    for index, url in enumerate(urls, 1):
+        if index > 1 and delay_seconds > 0:
+            time.sleep(delay_seconds)
+        try:
+            markup = fetch_public_search_page(url)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            blocker = write_blocker(
+                blocker_path,
+                "discover",
+                f"public fetch failed: {exc}",
+                source_url=url,
+                data={"query": query_text, "location": location},
+            )
+            blockers.append(blocker)
+            append_event("robotaua_public_fetch_blocked", "robotaua", status="blocked", payload=blocker, db_path=db_path)
+            continue
+
+        html_path = fetch_dir / f"robotaua_public_{time.strftime('%Y%m%d_%H%M%S')}_{index}.html"
+        html_path.write_text(markup, encoding="utf-8")
+        normalized = normalize_markup(
+            markup,
+            url,
+            query_text,
+            output,
+            append=index > 1 or output.exists(),
+            db_path=db_path,
+            status_path=status_path,
+        )
+        total_observations += int(normalized["observations"])
+        fetched_pages.append({"url": url, "html": str(html_path), "observations": normalized["observations"]})
+
+    review = {}
+    if total_observations:
+        review = build_review_queue(
+            output,
+            drafts_path,
+            review_csv_path,
+            progress_path,
+            limit=limit,
+            db_path=db_path,
+            status_path=status_path,
+        )
+    event = status_event(
+        "run_once",
+        "complete" if total_observations else "blocked",
+        f"Robota.ua run-once fetched {len(fetched_pages)} pages and normalized {total_observations} vacancies",
+        {
+            "query": query_text,
+            "location": location,
+            "fetched_pages": fetched_pages,
+            "blockers": blockers,
+            "review": review,
+        },
+    )
+    write_jsonl(status_path, [event], append=True)
+    append_event("robotaua_public_fetch_complete", "robotaua", status=event["status"], payload=event, db_path=db_path)
+    snapshot = build_robotaua_progress_snapshot(db_path=db_path)
+    write_json(progress_path, snapshot_to_dict(snapshot))
+    return {
+        "fetched_pages": len(fetched_pages),
+        "observations": total_observations,
+        "review_rows": review.get("rows", 0) if review else 0,
+        "blockers": len(blockers),
+        "progress": str(progress_path),
+        "db": str(db_path),
     }
 
 
@@ -278,9 +440,24 @@ def main(argv: list[str] | None = None) -> int:
     urls.add_argument("--location", default="")
     urls.add_argument("--limit", type=int, default=25)
 
+    run = sub.add_parser("run-once")
+    run.add_argument("--query", default="Python AI")
+    run.add_argument("--location", default="")
+    run.add_argument("--limit", type=int, default=10)
+    run.add_argument("--max-pages", type=int, default=1)
+    run.add_argument("--delay-seconds", type=float, default=2.0)
+    run.add_argument("--output", type=Path, default=ROBOTA_OBSERVATIONS_PATH)
+    run.add_argument("--drafts", type=Path, default=ROBOTA_OUTREACH_DRAFTS_PATH)
+    run.add_argument("--review-csv", type=Path, default=ROBOTA_REVIEW_QUEUE_PATH)
+    run.add_argument("--progress", type=Path, default=ROBOTA_PROGRESS_SNAPSHOT_PATH)
+    run.add_argument("--fetch-dir", type=Path, default=ROBOTA_FETCH_DIR)
+    run.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    run.add_argument("--status", type=Path, default=ROBOTA_STATUS_EVENTS_PATH)
+    run.add_argument("--blockers", type=Path, default=ROBOTA_BLOCKERS_PATH)
+
     normalize = sub.add_parser("normalize-html")
     normalize.add_argument("--html", type=Path, required=True)
-    normalize.add_argument("--source-url", default="https://robota.ua/zapros/Python+AI")
+    normalize.add_argument("--source-url", default="https://robota.ua/zapros/python-ai/ukraine")
     normalize.add_argument("--query", default="Python AI")
     normalize.add_argument("--output", type=Path, default=ROBOTA_OBSERVATIONS_PATH)
     normalize.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
@@ -305,6 +482,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "discovery-urls":
         print_discovery_urls(args.query, args.location, args.limit)
+        return 0
+    if args.command == "run-once":
+        result = run_once(
+            args.query,
+            args.location,
+            args.limit,
+            args.max_pages,
+            args.delay_seconds,
+            args.output,
+            args.drafts,
+            args.review_csv,
+            args.progress,
+            args.fetch_dir,
+            db_path=args.db,
+            status_path=args.status,
+            blocker_path=args.blockers,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
     if args.command == "normalize-html":
         result = normalize_html(

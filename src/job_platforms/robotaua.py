@@ -97,6 +97,11 @@ def _absolute_url(base_url: str, href: str) -> str:
     return urllib.parse.urljoin(base_url or "https://robota.ua/", href)
 
 
+def _slug(value: str) -> str:
+    parts = re.findall(r"\w+", value.strip().lower(), flags=re.UNICODE)
+    return "-".join(part.replace("_", "-") for part in parts).strip("-")
+
+
 def _robotaua_vacancy_id(url: str) -> str:
     match = re.search(r"/vacancy(\d+)", urllib.parse.urlparse(url).path, re.IGNORECASE)
     return match.group(1) if match else ""
@@ -205,10 +210,11 @@ class RobotaUaAdapter(JobPlatformAdapter):
     )
 
     def discovery_urls(self, query: DiscoveryQuery) -> list[str]:
-        text = urllib.parse.quote_plus(query.text.strip())
+        text = _slug(query.text)
         if not text:
             raise ValueError("Robota.ua discovery query text is required")
-        return [f"https://robota.ua/zapros/{text}"]
+        location = _slug(query.location) if query.location else "ukraine"
+        return [f"https://robota.ua/zapros/{urllib.parse.quote(text)}/{urllib.parse.quote(location)}"]
 
     def normalize_vacancy(self, raw: dict) -> VacancyObservation:
         source_url = self.normalize_url(str(raw.get("source_url", "")))
@@ -362,13 +368,14 @@ def create_robotaua_review_draft(
     observation: VacancyObservation,
     job_id: int,
     resume: ResumeArtifact | None = None,
+    resume_id: int | None = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> int:
     adapter = RobotaUaAdapter()
     draft = adapter.draft_outreach(observation, resume or default_resume_artifact())
     if draft.submission_allowed or draft.upload_allowed:
         raise PermissionError("Robota.ua review drafts must keep submit/upload disabled")
-    outreach_id = add_outreach_draft(job_id, draft, resume_id=None, db_path=db_path)
+    outreach_id = add_outreach_draft(job_id, draft, resume_id=resume_id, db_path=db_path)
     append_event(
         "robotaua_manual_handoff_required",
         "robotaua",
