@@ -56,7 +56,7 @@ PIPELINE_GATES = [
     ("score", "Score", "Local fit scoring"),
     ("draft", "Draft", "Local message draft"),
     ("review_approval", "Review Approval", "Owner review required"),
-    ("final_gated_apply_manual_handoff", "Final Gated Apply / Manual Handoff", "No Work.ua submit automation"),
+    ("final_gated_apply_manual_handoff", "Final Gated Apply / Browser Adapter", "Separate approved CSV adapter required"),
     ("status_tracking", "Status Tracking", "Shared DB append-only events"),
 ]
 
@@ -212,7 +212,7 @@ class WorkUaAdapter(JobPlatformAdapter):
         display_name="Work.ua",
         allowed_hosts=("work.ua", "www.work.ua"),
         supports_prepare_only=False,
-        notes="Public discovery/draft/status only; no apply/send/upload automation.",
+        notes="Public discovery/draft/status adapter; live browser apply is handled by the gated Work.ua CSV CLI.",
     )
 
     def discovery_urls(self, query: DiscoveryQuery) -> list[str]:
@@ -419,7 +419,7 @@ def create_workua_review_draft(
         "needs_owner_review",
         {
             "gate": "final_gated_apply_manual_handoff",
-            "reason": "Work.ua adapter has no submit automation; owner must review exact vacancy/message/resume.",
+            "reason": "Work.ua review artifacts do not permit submit; use an approved Work.ua CSV artifact for live browser apply.",
         },
         db_path,
     )

@@ -2,10 +2,11 @@
 
 Created: 2026-06-11
 
-This slice is discovery, normalization, scoring, drafting, review, manual
-handoff, and status tracking only. It does not log in, inspect cookies, read
-browser profiles, upload resumes, click apply buttons, submit forms, or change
-Work.ua account state.
+This slice includes public discovery, normalization, scoring, drafting, review,
+manual handoff, status tracking, and a separately gated browser-assisted CSV
+adapter for Work.ua prepare/submit attempts. It does not log in, inspect
+cookies, read browser profiles, upload resumes, or change Work.ua account
+settings.
 
 ## Files
 
@@ -14,9 +15,14 @@ Work.ua account state.
   snapshot.
 - `src/workua_public_run_once.py`: bounded CLI wrapper for public search URL
   fetch/read and review-only artifact generation.
+- `src/workua_csv_apply.py`: browser-assisted CSV adapter for explicitly
+  approved Work.ua rows. Dry-run is default; browser prepare and final submit
+  require separate CLI flags.
 - `src/job_platforms/platforms.py`: registry-facing import for `WorkUaAdapter`.
 - `tests/test_workua_adapter.py`: safe parser, gate, shared DB, and progress
   coverage.
+- `tests/test_workua_csv_apply.py`: CSV gate, upload block, LinkedIn policy, and
+  dry-run attempt-log coverage.
 
 ## Pipeline Gates
 
@@ -49,12 +55,17 @@ Work.ua account state.
      final action policy.
 
 6. `final_gated_apply_manual_handoff`
-   - Current final path is manual handoff only.
-   - The adapter does not implement prepare or submit. Base methods raise
-     `PermissionError` before approval and `UnsupportedAction` after approval.
-   - A future executable Work.ua flow must remain behind
-     `approved_to_submit=true`, `final_submit_allowed=true`, and exact approved
-     message text.
+   - Review artifacts still stop at manual owner review.
+   - Executable Work.ua browser work is handled only by
+     `src/workua_csv_apply.py`.
+   - Browser prepare requires row-level `approved_to_submit=true`,
+     `final_submit_allowed=true`, an exact message, resume/LinkedIn policy, and
+     `--prepare-browser --i-understand-this-prepares-workua-application`.
+   - Final submit additionally requires
+     `--execute --i-understand-this-submits-workua-application`.
+   - Resume file upload is intentionally unsupported. A row using
+     `resume_policy=upload_resume` must name the exact resume and set
+     `upload_allowed=true`, but the current adapter still blocks before upload.
 
 7. `status_tracking`
    - `persist_workua_observation` and `create_workua_review_draft` write to the
@@ -87,6 +98,53 @@ The CLI:
 - stops before any application form action.
 
 It has no execute/apply/send/upload/profile-save flag.
+
+## Live CSV Adapter
+
+Dry-run validation:
+
+```powershell
+python src\workua_csv_apply.py --csv examples\workua_approved_jobs_sample.csv
+```
+
+Browser pre-submit prepare, with no final click:
+
+```powershell
+python src\workua_csv_apply.py --csv path\to\approved_workua.csv --prepare-browser --i-understand-this-prepares-workua-application
+```
+
+Final submit:
+
+```powershell
+python src\workua_csv_apply.py --csv path\to\approved_workua.csv --execute --i-understand-this-prepares-workua-application --i-understand-this-submits-workua-application
+```
+
+Required CSV columns:
+
+- `site`: must be `workua`
+- `url`: `https://www.work.ua/jobs/<id>/`
+- `message`: exact approved application message
+- `resume_policy`: `no_upload`, `no_resume`, `use_workua_profile`,
+  `use_selected_resume`, or `upload_resume`
+- `linkedin_policy`: `no_linkedin`, `include_in_message`, or `fill_field`
+- `upload_allowed`: `true` only for `resume_policy=upload_resume`
+- `approved_to_submit`: must be `true` for browser prepare/execute
+- `final_submit_allowed`: must be `true` for browser prepare/execute
+
+Optional CSV columns:
+
+- `title`
+- `company`
+- `linkedin`: required for `include_in_message` or `fill_field`
+- `approved_resume_name`: required for `use_selected_resume` and
+  `upload_resume`
+
+The adapter opens the public Work.ua vacancy in an already-running Chrome CDP
+session, navigates only through visible apply links, fills the exact message and
+LinkedIn field when policy says to do so, validates the DOM immediately before
+submit, logs a JSONL attempt under `data/job_waves/`, and stops before final
+submit unless `--execute` and the final submit confirmation flag are present.
+The attempt log stores message length and SHA-256, not the message body.
 
 ## Artifacts
 
