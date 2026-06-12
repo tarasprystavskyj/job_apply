@@ -143,14 +143,35 @@ class TelegramBot:
     def send(self, chat_id: str | int, text: str) -> None:
         self.request("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
 
-    def scan(self) -> Path:
+    def notify_auto_reply_events(self, events: list[dict[str, Any]], chat_id: str | int | None) -> None:
+        if not chat_id:
+            return
+        for event in events:
+            if not event.get("sent"):
+                continue
+            text = "\n".join(
+                [
+                    "Auto-replied to recruiter on Djinni.",
+                    f"Company: {event.get('company') or 'unknown'}",
+                    f"Intent: {event.get('auto_reply_intent')}",
+                    f"Confidence: {event.get('confidence')}",
+                    f"Thread: {event.get('thread_url')}",
+                ]
+            )
+            self.send(chat_id, text[:3900])
+
+    def scan(self, chat_id: str | int | None = None) -> Path:
         build_resume_index()
         try:
             scan_inbox()
         except Exception as exc:
             print(f"inbox scan skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
         try:
-            scan_recruiter_responses()
+            response_result = scan_recruiter_responses(
+                auto_reply=self.cfg.recruiter_auto_reply_enabled,
+                execute_auto_reply=self.cfg.recruiter_auto_reply_enabled,
+            )
+            self.notify_auto_reply_events(response_result.get("auto_reply_events") or [], chat_id)
         except Exception as exc:
             print(f"recruiter response scan skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return build_candidate_batch(limit=10)
@@ -204,7 +225,7 @@ class TelegramBot:
 
     def run_scan_and_report(self, state: dict[str, Any], chat_id: str | int) -> None:
         try:
-            batch = self.scan()
+            batch = self.scan(chat_id=chat_id)
             state["latest_batch"] = str(batch)
             save_state(state)
             self.send(chat_id, self.format_batch(batch))
@@ -269,7 +290,7 @@ class TelegramBot:
                 if now.hour == self.cfg.daily_hour and state.get("last_daily_date") != now.strftime("%Y-%m-%d"):
                     chat_id = self.cfg.telegram_chat_id
                     if chat_id:
-                        batch = self.scan()
+                        batch = self.scan(chat_id=chat_id)
                         state["latest_batch"] = str(batch)
                         state["last_daily_date"] = now.strftime("%Y-%m-%d")
                         save_state(state)
