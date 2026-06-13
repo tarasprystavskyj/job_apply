@@ -81,6 +81,48 @@ class TelegramBotCommandTests(unittest.TestCase):
             self.assertEqual(launched, [str(batch)])
             self.assertTrue(any("Approved and started all-site batch" in text for text in sent))
 
+    def test_approve_latest_alias_uses_renamed_command(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            self.write_batch(batch)
+            sent: list[str] = []
+            launched: list[str] = []
+            bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+            bot.send = lambda _chat_id, text: sent.append(text)
+            bot.run_submit_and_report = lambda batch_arg, _chat_id: launched.append(batch_arg)
+
+            with patch.object(job_apply_telegram_bot.threading, "Thread", ImmediateThread):
+                bot.handle_text(123, "/approve_latest", {"latest_batch": str(batch)})
+
+            self.assertEqual(launched, [str(batch)])
+            self.assertTrue(any("Approved and started all-site batch" in text for text in sent))
+
+    def test_latest_submission_blocker_summary_includes_all_site_logs(self) -> None:
+        events = [
+            {
+                "site": "workua",
+                "source_url": "https://www.work.ua/jobs/8170878/",
+                "company": "Netpeak",
+                "result": "blocked_validation",
+                "blocked_reason": "linkedin is required",
+                "attempted_at": "2026-06-12T18:10:00+0300",
+            },
+            {
+                "site": "dou",
+                "source_url": "https://jobs.dou.ua/companies/example/vacancies/12345/",
+                "company": "Example DOU",
+                "result": "blocked_no_apply_form",
+                "blocked_reason": "apply form not visible",
+                "attempted_at": "2026-06-12T18:09:00+0300",
+            },
+        ]
+
+        with patch.object(job_apply_telegram_bot, "submission_log_events", return_value=events):
+            summary = job_apply_telegram_bot.latest_submission_blocker_summary()
+
+        self.assertIn("[Work.ua] Netpeak", summary)
+        self.assertIn("[DOU] Example DOU", summary)
+
     def test_sync_web_state_latest_batch_updates_parallel_web_interface(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "web_state.json"

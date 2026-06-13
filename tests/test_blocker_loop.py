@@ -60,6 +60,38 @@ class BlockerLoopTests(unittest.TestCase):
             self.assertEqual(blockers[0].data["category"], "profile_update_required")
             self.assertTrue(any(edge.source == blockers[0].id and edge.target == "stage:submit" for edge in snapshot.edges))
 
+    def test_refresh_unresolved_blockers_reads_canonical_all_site_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            web_runs = base / "web_runs"
+            web_runs.mkdir()
+            dou_log = base / "dou_submission_attempts.jsonl"
+            dou_log.write_text(
+                json.dumps(
+                    {
+                        "site": "dou",
+                        "source_url": "https://jobs.dou.ua/companies/example/vacancies/12345/",
+                        "company": "Example",
+                        "title": "Python Engineer",
+                        "result": "blocked_validation",
+                        "blocked_reason": "message quality validation failed",
+                        "attempted_at": "2026-06-12T18:00:00+0300",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            blockers = blocker_loop.refresh_unresolved_blockers(
+                web_runs,
+                base / "unresolved_blockers.jsonl",
+                log_paths={"dou": dou_log},
+            )
+
+            self.assertEqual(len(blockers), 1)
+            self.assertEqual(blockers[0]["site"], "dou")
+            self.assertEqual(blockers[0]["category"], "validation_or_approval_gate")
+
 
 if __name__ == "__main__":
     unittest.main()

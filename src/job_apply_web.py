@@ -27,6 +27,7 @@ from vacancy_pipeline import OBSERVATION_PATHS, build_candidate_batch, candidate
 
 
 STATE_PATH = ROOT / "data" / "job_waves" / "web_state.json"
+FUNCTION_GRAPH_NOTES_PATH = ROOT / "data" / "job_waves" / "function_graph_notes.json"
 WEB_RUNS_DIR = ROOT / "data" / "job_waves" / "web_runs"
 SUBMISSION_LOGS = {
     "djinni": ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl",
@@ -57,6 +58,7 @@ BUTTON_HINTS = {
         "profile_on": "Open Djinni profile controls and try to enable the candidate profile. This changes account visibility when the site allows it.",
         "bot_note": "Write the latest batch/status summary for the Telegram bot notification flow; it does not submit applications.",
         "progress": "Open the platform progress dashboard with agent branch/readiness status.",
+        "function_graph": "Open the editable local function map for requirements notes, comments, and subtasks.",
         "sent": "Open the table of vacancies where an application was sent successfully or confirmed by post-submit evidence.",
         "save_selected": "Save only the checked rows as approved and clear approval from unchecked or blocked rows.",
         "approve_all": "Approve every currently supported application row and every review/reply row visible in this batch.",
@@ -181,6 +183,7 @@ BUTTON_HINTS["uk"]["scan"] = (
     "Оновити всі налаштовані джерела: Djinni inbox, відповіді рекрутерів, DOU, Work.ua, Robota.ua; "
     "після цього зібрати новий CSV для перегляду і нічого не відправляти."
 )
+BUTTON_HINTS["uk"]["function_graph"] = BUTTON_HINTS["en"]["function_graph"]
 
 
 def load_state() -> dict:
@@ -216,6 +219,68 @@ def sync_state_with_scan_summary(state: dict) -> dict:
 def save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_function_graph_notes(path: Path | None = None) -> dict:
+    path = path or FUNCTION_GRAPH_NOTES_PATH
+    default = {"schema": "job.function_graph_notes.v0", "nodes": {}}
+    if not path.exists():
+        return default
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    if not isinstance(payload, dict):
+        return default
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, dict):
+        nodes = {}
+    return {"schema": str(payload.get("schema") or default["schema"]), "nodes": nodes}
+
+
+def save_function_graph_note(
+    node_id: str,
+    *,
+    status_note: str = "",
+    comment: str = "",
+    subtask: str = "",
+    path: Path | None = None,
+) -> dict:
+    path = path or FUNCTION_GRAPH_NOTES_PATH
+    graph = function_graph()
+    valid_node_ids = {str(node.get("id")) for node in graph["nodes"]}
+    node_id = node_id.strip()
+    if node_id not in valid_node_ids:
+        raise ValueError(f"Unknown function graph node: {node_id}")
+    payload = load_function_graph_notes(path)
+    nodes = payload.setdefault("nodes", {})
+    note = nodes.setdefault(node_id, {"status_note": "", "comments": [], "subtasks": []})
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    status_note = status_note.strip()
+    comment = comment.strip()
+    subtask = subtask.strip()
+    if not any([status_note, comment, subtask]):
+        return payload
+    if not isinstance(note.get("comments"), list):
+        note["comments"] = []
+    if not isinstance(note.get("subtasks"), list):
+        note["subtasks"] = []
+    if status_note:
+        note["status_note"] = status_note[:500]
+    if comment:
+        note["comments"].append({"created_at": now, "text": comment[:1000]})
+    if subtask:
+        note["subtasks"].append({"created_at": now, "status": "open", "text": subtask[:500]})
+    note["updated_at"] = now
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
+def function_graph_with_notes(path: Path | None = None) -> dict:
+    graph = function_graph()
+    graph["notes"] = load_function_graph_notes(path)
+    return graph
 
 
 def normalized_site(row: dict[str, str]) -> str:
@@ -783,6 +848,9 @@ def render_language_switch(path: str, lang: str) -> str:
 
 
 FUNCTION_MAP_STYLE = """
+    .graph-note-form { display: grid; grid-template-columns: 180px repeat(3, minmax(150px, 1fr)) auto; gap: 10px; align-items: end; margin: 18px 0; }
+    .graph-note-form label { display: grid; gap: 4px; font-size: 13px; color: #52606d; }
+    .graph-note-form select, .graph-note-form input { padding: 7px 9px; border: 1px solid #bcccdc; border-radius: 6px; min-width: 0; }
     .map-controls { display: flex; gap: 12px; margin: 18px 0; flex-wrap: wrap; align-items: center; }
     .map-controls select, .map-controls input { padding: 7px 9px; border: 1px solid #bcccdc; border-radius: 6px; }
     .function-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
@@ -805,6 +873,7 @@ FUNCTION_MAP_STYLE = """
     .detail-panel h2 { margin-top: 0; }
     .detail-panel dt { font-weight: 700; margin-top: 10px; }
     .detail-panel dd { margin: 2px 0 0; color: #52606d; }
+    @media (max-width: 980px) { .graph-note-form { grid-template-columns: 1fr; } }
     @media (max-width: 860px) { .function-layout { grid-template-columns: 1fr; } .detail-panel { position: static; } }
 """
 
@@ -1118,15 +1187,26 @@ def render_sent_applications_page(lang: str = "en") -> str:
 
 def render_function_map_page(lang: str = "en") -> str:
     lang = normalize_lang(lang)
-    graph = function_graph()
+    graph = function_graph_with_notes()
     nodes = graph["nodes"]
     groups = graph["groups"]
+    note_nodes = graph.get("notes", {}).get("nodes", {})
     group_options = "\n".join(
         f"<option value='{html.escape(group_id)}'>{html.escape(str(group.get('label', group_id)))}</option>"
         for group_id, group in groups.items()
     )
+    node_options = "\n".join(
+        f"<option value='{html.escape(str(node.get('id', '')))}'>{html.escape(str(node.get('label', node.get('id', ''))))}</option>"
+        for node in nodes
+    )
     cards = []
     for node in nodes:
+        node_id = str(node.get("id", ""))
+        note = note_nodes.get(node_id) if isinstance(note_nodes, dict) else None
+        if not isinstance(note, dict):
+            note = {}
+        comments = note.get("comments") if isinstance(note.get("comments"), list) else []
+        subtasks = note.get("subtasks") if isinstance(note.get("subtasks"), list) else []
         group = str(node.get("group", ""))
         shape = str(node.get("shape", "box"))
         status = str(node.get("status", ""))
@@ -1134,12 +1214,18 @@ def render_function_map_page(lang: str = "en") -> str:
         label = str(node.get("label", ""))
         owner = str(node.get("owner", "system"))
         color = str(groups.get(group, {}).get("color", "#4a5568"))
+        note_text = str(note.get("status_note") or "")
+        note_badge = ""
+        if note_text or comments or subtasks:
+            note_badge = f"<small>{len(comments)} comments | {len(subtasks)} subtasks</small>"
         cards.append(
             f"<button class='map-node shape-{html.escape(shape)} status-{html.escape(status)}' "
             f"data-group='{html.escape(group)}' data-detail='{html.escape(detail, quote=True)}' "
             f"data-owner='{html.escape(owner, quote=True)}' data-status='{html.escape(status, quote=True)}' "
+            f"data-note='{html.escape(note_text, quote=True)}' "
             f"style='--group-color:{html.escape(color)}' title='{html.escape(detail, quote=True)}'>"
             f"<span>{html.escape(label)}</span><small>{html.escape(group)} | {html.escape(status)}</small>"
+            f"{note_badge}"
             "</button>"
         )
     edges = graph["edges"]
@@ -1151,6 +1237,31 @@ def render_function_map_page(lang: str = "en") -> str:
         "</tr>"
         for edge in edges
     )
+    note_rows = []
+    if isinstance(note_nodes, dict):
+        labels_by_id = {str(node.get("id")): str(node.get("label") or node.get("id")) for node in nodes}
+        for node_id, note in sorted(note_nodes.items()):
+            if not isinstance(note, dict):
+                continue
+            comments = note.get("comments") if isinstance(note.get("comments"), list) else []
+            subtasks = note.get("subtasks") if isinstance(note.get("subtasks"), list) else []
+            last_comment = ""
+            if comments and isinstance(comments[-1], dict):
+                last_comment = str(comments[-1].get("text") or "")
+            open_subtasks = [
+                str(item.get("text") or "")
+                for item in subtasks
+                if isinstance(item, dict) and str(item.get("status") or "open") == "open"
+            ]
+            note_rows.append(
+                "<tr>"
+                f"<td>{html.escape(labels_by_id.get(str(node_id), str(node_id)))}</td>"
+                f"<td>{html.escape(str(note.get('status_note') or ''))}</td>"
+                f"<td>{html.escape(last_comment)}</td>"
+                f"<td>{html.escape('; '.join(open_subtasks[:3]))}</td>"
+                "</tr>"
+            )
+    notes_html = "\n".join(note_rows) or "<tr><td colspan='4'>No graph notes yet.</td></tr>"
     graph_json = html.escape(json.dumps(graph, ensure_ascii=False), quote=True)
     body = f"""
   <header>
@@ -1163,6 +1274,14 @@ def render_function_map_page(lang: str = "en") -> str:
       <a class="button" href="/function-map.json">JSON</a>
     </div>
   </header>
+  <form class="graph-note-form" method="post" action="/function-map/notes">
+    <input type="hidden" name="lang" value="{html.escape(lang)}">
+    <label>Node <select name="node_id">{node_options}</select></label>
+    <label>Status note <input name="status_note" maxlength="500" placeholder="decision, requirement, or blocker note"></label>
+    <label>Comment <input name="comment" maxlength="1000" placeholder="owner/agent comment"></label>
+    <label>Subtask <input name="subtask" maxlength="500" placeholder="next bounded task"></label>
+    <button type="submit" {tooltip_attrs("Save a local graph note, comment, or open subtask without changing live application state.")}>Save graph note</button>
+  </form>
   <section class="map-controls">
     <label>Group <select id="groupFilter"><option value="">All</option>{group_options}</select></label>
     <label>Text <input id="textFilter" type="search" placeholder="filter"></label>
@@ -1172,8 +1291,12 @@ def render_function_map_page(lang: str = "en") -> str:
     <aside class="detail-panel">
       <h2 id="detailTitle">Hover a node</h2>
       <p id="detailText">Task details will appear here.</p>
-      <dl><dt>Status</dt><dd id="detailStatus">-</dd><dt>Owner</dt><dd id="detailOwner">-</dd></dl>
+      <dl><dt>Status</dt><dd id="detailStatus">-</dd><dt>Owner</dt><dd id="detailOwner">-</dd><dt>Note</dt><dd id="detailNote">-</dd></dl>
     </aside>
+  </section>
+  <section class="section">
+    <h2>Requirements Notes</h2>
+    <table><thead><tr><th>Node</th><th>Status note</th><th>Last comment</th><th>Open subtasks</th></tr></thead><tbody>{notes_html}</tbody></table>
   </section>
   <section class="section">
     <h2>Relationships</h2>
@@ -1185,11 +1308,13 @@ def render_function_map_page(lang: str = "en") -> str:
     const text = document.getElementById('detailText');
     const status = document.getElementById('detailStatus');
     const owner = document.getElementById('detailOwner');
+    const note = document.getElementById('detailNote');
     function showNode(node) {{
       title.textContent = node.querySelector('span').textContent;
       text.textContent = node.dataset.detail || '';
       status.textContent = node.dataset.status || '';
       owner.textContent = node.dataset.owner || '';
+      note.textContent = node.dataset.note || '-';
       nodes.forEach(item => item.classList.toggle('selected', item === node));
     }}
     nodes.forEach(node => {{
@@ -1500,7 +1625,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond_html(render_function_map_page(lang))
             return
         if path == "/function-map.json":
-            self.respond_json(function_graph())
+            self.respond_json(function_graph_with_notes())
             return
         if path == "/platform-progress":
             self.respond_html(render_platform_progress_page())
@@ -1512,6 +1637,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        lang = lang_from_request(self.path)
         length = int(self.headers.get("Content-Length", "0") or "0")
         form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace")) if length else {}
         if path == "/scan":
@@ -1587,6 +1713,20 @@ class Handler(BaseHTTPRequestHandler):
             note = ROOT / "data" / "job_waves" / "telegram_bot_status.txt"
             note.write_text("Telegram bot skeleton is ready. Run manually: python src\\job_apply_telegram_bot.py\n", encoding="utf-8")
             self.redirect("/")
+            return
+        if path == "/function-map/notes":
+            try:
+                save_function_graph_note(
+                    (form.get("node_id") or [""])[0],
+                    status_note=(form.get("status_note") or [""])[0],
+                    comment=(form.get("comment") or [""])[0],
+                    subtask=(form.get("subtask") or [""])[0],
+                )
+            except ValueError as exc:
+                self.send_error(400, str(exc))
+                return
+            target_lang = normalize_lang((form.get("lang") or [lang])[0])
+            self.redirect(url_with_lang("/function-map", target_lang))
             return
         self.send_error(404)
 

@@ -190,9 +190,32 @@ class JobApplyWebTests(unittest.TestCase):
         graph = job_apply_web.function_graph()
 
         self.assertIn("groupFilter", html)
+        self.assertIn("Save graph note", html)
         self.assertIn("Message QA gate", html)
         self.assertIn("data-detail=", html)
         self.assertTrue(any(node["id"] == "source_scan" for node in graph["nodes"]))
+
+    def test_function_map_notes_persist_comments_and_subtasks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            notes_path = Path(td) / "function_graph_notes.json"
+
+            with patch.object(job_apply_web, "FUNCTION_GRAPH_NOTES_PATH", notes_path):
+                payload = job_apply_web.save_function_graph_note(
+                    "graph_tz",
+                    status_note="MVP accepts local notes before full graph editing.",
+                    comment="Owner asked for graph comment support.",
+                    subtask="Add resolved-subtask controls later.",
+                )
+                html = job_apply_web.render_function_map_page("en")
+                graph = job_apply_web.function_graph_with_notes()
+
+            note = payload["nodes"]["graph_tz"]
+            self.assertEqual(note["status_note"], "MVP accepts local notes before full graph editing.")
+            self.assertEqual(note["comments"][0]["text"], "Owner asked for graph comment support.")
+            self.assertEqual(note["subtasks"][0]["status"], "open")
+            self.assertIn("Requirements Notes", html)
+            self.assertIn("Owner asked for graph comment support.", html)
+            self.assertIn("function_graph_notes.v0", graph["notes"]["schema"])
 
     def test_sent_applications_page_lists_successful_events_with_open_link(self) -> None:
         with tempfile.TemporaryDirectory() as td:

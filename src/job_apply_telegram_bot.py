@@ -15,7 +15,7 @@ import requests
 
 from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
-from job_apply_web import count_approved_rows, launch_approved_runs, update_batch_approvals
+from job_apply_web import SITE_LABELS, count_approved_rows, display_result, launch_approved_runs, submission_log_events, update_batch_approvals
 from job_scan_sources import format_scan_summary, run_all_sources_scan
 from recruiter_response_scan import latest_response_summary, scan_recruiter_responses
 from resume_index import build_resume_index
@@ -86,20 +86,21 @@ def load_submission_events(path: Path = SUBMISSION_LOG_PATH) -> list[dict[str, A
 
 def latest_submission_blocker_summary(limit: int = 5) -> str:
     cfg = settings()
-    events = load_submission_events()
+    events = submission_log_events(limit=200)
+    if not events:
+        events = load_submission_events()
     if not events:
         return "Submission blockers: no submission log yet."
     latest_by_url: dict[str, dict[str, Any]] = {}
     for event in events:
-        url = str(event.get("source_url", ""))
-        if url:
+        url = str(event.get("source_url") or event.get("url") or event.get("thread_url") or "")
+        if url and url not in latest_by_url:
             latest_by_url[url] = event
     blockers = [
         event
         for event in latest_by_url.values()
-        if str(event.get("source_url", "")).startswith("https://djinni.co/jobs/")
-        and (
-            str(event.get("result", "")).startswith("blocked")
+        if (
+            display_result(event).startswith("blocked")
             or str(event.get("blocked_reason", "")).strip()
         )
     ]
@@ -119,11 +120,13 @@ def latest_submission_blocker_summary(limit: int = 5) -> str:
     )[:limit]
     lines = ["Submission blockers:"]
     for event in blockers:
+        site = str(event.get("site") or "")
+        site_label = SITE_LABELS.get(site, site or "unknown")
         company = event.get("company") or "unknown company"
         result = event.get("result") or "unknown result"
         reason = event.get("blocked_reason") or "; ".join(event.get("errors") or []) or "no detailed reason"
-        url = event.get("source_url") or ""
-        lines.append(f"- {company}: {result}; {reason}")
+        url = event.get("source_url") or event.get("url") or event.get("thread_url") or ""
+        lines.append(f"- [{site_label}] {company}: {result}; {reason}")
         if url:
             lines.append(str(url))
     if has_profile_update:
@@ -212,7 +215,8 @@ class TelegramBot:
         if getattr(self, "_last_scan_status", ""):
             lines.append(str(self._last_scan_status))
             lines.append("")
-        lines.append("To approve and send all supported rows immediately: /approve_and_send_latest")
+        lines.append("To approve and send all supported rows immediately: /approve_latest")
+        lines.append("Alias: /approve_and_send_latest")
         lines.append("To scan again: /scan")
         return "\n".join(lines)
 
@@ -277,7 +281,7 @@ class TelegramBot:
         if command in {"/approve_and_send_latest", "/approve_latest"}:
             self.approve_latest(state, chat_id)
             return
-        self.send(chat_id, "Commands: /scan, /approve_and_send_latest, /status")
+        self.send(chat_id, "Commands: /scan, /approve_latest, /approve_and_send_latest, /status")
 
     def poll_once(self, state: dict[str, Any], timeout: int = 1) -> int:
         data = self.request(

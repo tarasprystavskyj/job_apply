@@ -11,6 +11,12 @@ from job_apply_config import ROOT
 
 WEB_RUNS_DIR = ROOT / "data" / "job_waves" / "web_runs"
 UNRESOLVED_BLOCKERS_PATH = ROOT / "data" / "job_waves" / "unresolved_blockers.jsonl"
+CANONICAL_SUBMISSION_LOGS = {
+    "djinni": ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl",
+    "workua": ROOT / "data" / "job_waves" / "workua_submission_attempts.jsonl",
+    "dou": ROOT / "data" / "job_waves" / "dou_submission_attempts.jsonl",
+    "robotaua": ROOT / "data" / "job_waves" / "robotaua_submission_attempts.jsonl",
+}
 BLOCKED_RESULTS = {
     "blocked_validation",
     "blocked_no_apply_form",
@@ -65,13 +71,29 @@ def normalize_result(event: dict[str, Any]) -> str:
     return result
 
 
-def iter_submission_events(log_dir: Path = WEB_RUNS_DIR) -> list[dict[str, Any]]:
+def iter_submission_events(
+    log_dir: Path = WEB_RUNS_DIR,
+    log_paths: dict[str, Path] | None = None,
+) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     if not log_dir.exists():
-        return events
-    for path in sorted(log_dir.glob("*.jsonl"), key=lambda item: item.stat().st_mtime):
+        web_paths: list[Path] = []
+    else:
+        web_paths = sorted(log_dir.glob("*.jsonl"), key=lambda item: item.stat().st_mtime)
+    for path in web_paths:
         for event in read_jsonl(path):
             event = dict(event)
+            event["_log_file"] = path.name
+            event["_log_mtime"] = path.stat().st_mtime
+            events.append(event)
+    if log_paths is None:
+        log_paths = CANONICAL_SUBMISSION_LOGS if log_dir == WEB_RUNS_DIR else {}
+    for site, path in log_paths.items():
+        if not path.exists():
+            continue
+        for event in read_jsonl(path):
+            event = dict(event)
+            event.setdefault("site", site)
             event["_log_file"] = path.name
             event["_log_mtime"] = path.stat().st_mtime
             events.append(event)
@@ -252,8 +274,9 @@ def collect_unresolved_blockers(events: list[dict[str, Any]]) -> list[dict[str, 
 def refresh_unresolved_blockers(
     log_dir: Path = WEB_RUNS_DIR,
     output: Path = UNRESOLVED_BLOCKERS_PATH,
+    log_paths: dict[str, Path] | None = None,
 ) -> list[dict[str, Any]]:
-    blockers = collect_unresolved_blockers(iter_submission_events(log_dir))
+    blockers = collect_unresolved_blockers(iter_submission_events(log_dir, log_paths=log_paths))
     write_jsonl(output, blockers)
     return blockers
 
