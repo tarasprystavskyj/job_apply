@@ -133,7 +133,9 @@ def classify_blocker(event: dict[str, Any]) -> str:
         return "resume_required_or_upload_failed"
     if "validation" in result or "must be true" in reason or "requires exact" in reason:
         return "validation_or_approval_gate"
-    if "no visible" in reason or "no apply" in result or "application surface" in result:
+    if result == "blocked_fill_failed":
+        return "fill_or_selector_failed"
+    if "no visible" in reason or "application surface" in reason or "no apply" in result:
         return "site_changed_or_no_apply_surface"
     return "unknown_blocker"
 
@@ -246,6 +248,48 @@ def build_blocker_record(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def blocker_site_url_key(record: dict[str, Any]) -> str:
+    site = str(record.get("site") or "")
+    url = str(record.get("source_url") or "").lower().rstrip("/")
+    return "|".join([site, url])
+
+
+def blocker_url_key(record: dict[str, Any]) -> str:
+    return str(record.get("source_url") or "").lower().rstrip("/")
+
+
+def is_more_specific_blocker(record: dict[str, Any]) -> bool:
+    return str(record.get("category") or "") != "unknown_blocker"
+
+
+def drop_stale_unknown_blockers(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    newest_specific_seen: dict[str, str] = {}
+    newest_specific_seen_by_url: dict[str, str] = {}
+    for record in records:
+        if not is_more_specific_blocker(record):
+            continue
+        key = blocker_site_url_key(record)
+        url_key = blocker_url_key(record)
+        last_seen = str(record.get("last_seen_at") or "")
+        if last_seen > newest_specific_seen.get(key, ""):
+            newest_specific_seen[key] = last_seen
+        if url_key and last_seen > newest_specific_seen_by_url.get(url_key, ""):
+            newest_specific_seen_by_url[url_key] = last_seen
+
+    filtered: list[dict[str, Any]] = []
+    for record in records:
+        if is_more_specific_blocker(record):
+            filtered.append(record)
+            continue
+        newer_specific_seen = newest_specific_seen.get(blocker_site_url_key(record), "")
+        if not newer_specific_seen and not str(record.get("site") or ""):
+            newer_specific_seen = newest_specific_seen_by_url.get(blocker_url_key(record), "")
+        if newer_specific_seen and newer_specific_seen > str(record.get("last_seen_at") or ""):
+            continue
+        filtered.append(record)
+    return filtered
+
+
 def collect_unresolved_blockers(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     resolved_urls = {event_url(event).lower().rstrip("/") for event in events if normalize_result(event) in RESOLVED_RESULTS}
     records: dict[str, dict[str, Any]] = {}
@@ -268,7 +312,11 @@ def collect_unresolved_blockers(events: list[dict[str, Any]]) -> list[dict[str, 
                 records[key]["resolution_options"] = record["resolution_options"]
         else:
             records[key] = record
-    return sorted(records.values(), key=lambda row: str(row.get("last_seen_at") or ""), reverse=True)
+    return sorted(
+        drop_stale_unknown_blockers(list(records.values())),
+        key=lambda row: str(row.get("last_seen_at") or ""),
+        reverse=True,
+    )
 
 
 def refresh_unresolved_blockers(

@@ -92,6 +92,75 @@ class BlockerLoopTests(unittest.TestCase):
             self.assertEqual(blockers[0]["site"], "dou")
             self.assertEqual(blockers[0]["category"], "validation_or_approval_gate")
 
+    def test_fill_failed_blocker_is_selector_or_fill_category(self) -> None:
+        record = blocker_loop.build_blocker_record(
+            {
+                "site": "workua",
+                "source_url": "https://www.work.ua/jobs/123/",
+                "result": "blocked_fill_failed",
+                "attempted_at": "2026-06-15T10:00:00+0300",
+            }
+        )
+
+        self.assertEqual(record["category"], "fill_or_selector_failed")
+
+    def test_no_application_surface_blocker_is_site_changed_category(self) -> None:
+        record = blocker_loop.build_blocker_record(
+            {
+                "site": "workua",
+                "source_url": "https://www.work.ua/jobs/123/",
+                "result": "blocked_no_application_surface",
+                "attempted_at": "2026-06-15T10:00:00+0300",
+            }
+        )
+
+        self.assertEqual(record["category"], "site_changed_or_no_apply_surface")
+
+    def test_newer_specific_blocker_suppresses_stale_unknown_for_same_site_url(self) -> None:
+        blockers = blocker_loop.collect_unresolved_blockers(
+            [
+                {
+                    "site": "workua",
+                    "source_url": "https://www.work.ua/jobs/123/",
+                    "result": "blocked_unclassified",
+                    "blocked_reason": "temporary blocker",
+                    "attempted_at": "2026-06-15T10:00:00+0300",
+                },
+                {
+                    "site": "workua",
+                    "source_url": "https://www.work.ua/jobs/123/",
+                    "result": "blocked_no_application_surface",
+                    "attempted_at": "2026-06-15T10:05:00+0300",
+                },
+            ]
+        )
+
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0]["category"], "site_changed_or_no_apply_surface")
+        self.assertEqual(blockers[0]["result"], "blocked_no_application_surface")
+
+    def test_newer_specific_blocker_suppresses_stale_unknown_when_old_site_missing(self) -> None:
+        blockers = blocker_loop.collect_unresolved_blockers(
+            [
+                {
+                    "source_url": "https://www.work.ua/jobs/123/",
+                    "result": "blocked_unclassified",
+                    "blocked_reason": "temporary blocker",
+                    "attempted_at": "2026-06-15T10:00:00+0300",
+                },
+                {
+                    "site": "workua",
+                    "source_url": "https://www.work.ua/jobs/123/",
+                    "result": "blocked_no_application_surface",
+                    "attempted_at": "2026-06-15T10:05:00+0300",
+                },
+            ]
+        )
+
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0]["site"], "workua")
+        self.assertEqual(blockers[0]["category"], "site_changed_or_no_apply_surface")
+
 
 if __name__ == "__main__":
     unittest.main()

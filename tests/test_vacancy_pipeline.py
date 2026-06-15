@@ -155,6 +155,91 @@ class VacancyPipelineTests(unittest.TestCase):
 
         self.assertFalse(actionable)
 
+    def test_submission_history_reads_terminal_results_for_all_sites(self) -> None:
+        events = [
+            {
+                "site": "workua",
+                "source_url": "https://www.work.ua/jobs/8170878/",
+                "result": "submitted_success",
+                "attempted_at": "2026-06-12T10:00:00+0300",
+            },
+            {
+                "site": "robotaua",
+                "source_url": "https://robota.ua/company3685368/vacancy11052703",
+                "result": "already_applied",
+                "attempted_at": "2026-06-12T11:00:00+0300",
+            },
+            {
+                "site": "dou",
+                "source_url": "https://jobs.dou.ua/companies/example/vacancies/12345/",
+                "result": "submit_clicked_unconfirmed",
+                "after": {"url": "https://jobs.dou.ua/companies/example/vacancies/12345/?applied=ok"},
+                "attempted_at": "2026-06-12T12:00:00+0300",
+            },
+        ]
+
+        history = vacancy_pipeline.latest_submission_by_url(events)
+
+        self.assertEqual(
+            vacancy_pipeline.terminal_submission_state({"source_url": "https://www.work.ua/jobs/8170878/"}, history),
+            "submitted_success",
+        )
+        self.assertEqual(
+            vacancy_pipeline.terminal_submission_state({"source_url": "https://robota.ua/company3685368/vacancy11052703/"}, history),
+            "already_applied",
+        )
+        self.assertEqual(
+            vacancy_pipeline.terminal_submission_state({"source_url": "https://jobs.dou.ua/companies/example/vacancies/12345/"}, history),
+            "submitted_success_inferred",
+        )
+
+    def test_candidate_batch_excludes_previously_submitted_public_vacancies(self) -> None:
+        observation = {
+            "source_site": "workua",
+            "source_url": "https://www.work.ua/jobs/8170878/",
+            "title": "Python Engineer",
+            "company": "Netpeak",
+            "fit_tags": ["python"],
+        }
+        submitted = {
+            "source_url": "https://www.work.ua/jobs/8170878/",
+            "result": "submitted_success",
+            "attempted_at": "2026-06-12T10:00:00+0300",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "batch.csv"
+            with (
+                patch.object(vacancy_pipeline, "latest_observations", return_value=[observation]),
+                patch.object(vacancy_pipeline, "latest_inbox_offers", return_value=[]),
+                patch.object(vacancy_pipeline, "latest_submission_by_url", return_value=vacancy_pipeline.latest_submission_by_url([submitted])),
+            ):
+                vacancy_pipeline.build_candidate_batch(limit=10, output=output)
+
+            text = output.read_text(encoding="utf-8")
+
+        self.assertNotIn("https://www.work.ua/jobs/8170878/", text)
+
+    def test_terminal_submission_history_survives_later_blocker_noise(self) -> None:
+        events = [
+            {
+                "source_url": "https://www.work.ua/jobs/8170878/",
+                "result": "submitted_success",
+                "attempted_at": "2026-06-12T10:00:00+0300",
+            },
+            {
+                "source_url": "https://www.work.ua/jobs/8170878/",
+                "result": "blocked_no_application_surface",
+                "attempted_at": "2026-06-12T11:00:00+0300",
+            },
+        ]
+
+        history = vacancy_pipeline.latest_submission_by_url(events)
+
+        self.assertEqual(
+            vacancy_pipeline.terminal_submission_state({"source_url": "https://www.work.ua/jobs/8170878/"}, history),
+            "submitted_success",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

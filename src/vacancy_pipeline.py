@@ -36,6 +36,7 @@ ROLE_TITLE_RE = re.compile(
 DJINNI_THREAD_ID_RE = re.compile(r"^https://djinni\.co/my/inbox/(\d+)/?(?:#.*)?$")
 INBOX_OFFERS_PATH = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 SUBMISSION_ATTEMPTS_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
+TERMINAL_SUBMISSION_RESULTS = {"submitted_success", "submitted_success_inferred", "already_applied"}
 OBSERVATION_PATHS = [
     ROOT / "data" / "job_waves" / "dou_observations.jsonl",
     ROOT / "data" / "job_waves" / "wave_2026-06-11_ai_automation_observations.jsonl",
@@ -167,29 +168,59 @@ def previously_replied_thread_urls() -> set[str]:
     }
 
 
-def latest_submission_by_url() -> dict[str, dict[str, Any]]:
-    if not SUBMISSION_ATTEMPTS_PATH.exists():
-        return {}
-    latest: dict[str, dict[str, Any]] = {}
-    for line in SUBMISSION_ATTEMPTS_PATH.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        if not line.strip():
-            continue
+def normalize_submission_url(url: str) -> str:
+    return url.strip().lower().rstrip("/")
+
+
+def latest_submission_by_url(events: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+    if events is None:
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
+            from blocker_loop import iter_submission_events, normalize_result
+
+            events = iter_submission_events()
+        except Exception:
+            events = []
+    else:
+        from blocker_loop import normalize_result
+
+    latest: dict[str, dict[str, Any]] = {}
+    for row in events:
+        url = str(row.get("source_url") or row.get("url") or "")
+        key = normalize_submission_url(url)
+        if not key:
             continue
-        url = str(row.get("source_url", ""))
-        if url:
-            latest[url] = row
+        normalized = dict(row)
+        normalized["result"] = normalize_result(normalized)
+        normalized.setdefault("source_url", url)
+        previous = latest.get(key)
+        if previous is None:
+            latest[key] = normalized
+            continue
+        if previous.get("result") in TERMINAL_SUBMISSION_RESULTS and normalized.get("result") not in TERMINAL_SUBMISSION_RESULTS:
+            continue
+        if normalized.get("result") in TERMINAL_SUBMISSION_RESULTS and previous.get("result") not in TERMINAL_SUBMISSION_RESULTS:
+            latest[key] = normalized
+            continue
+        if submission_event_sort_key(normalized) >= submission_event_sort_key(previous):
+            latest[key] = normalized
     return latest
 
 
+def submission_event_sort_key(event: dict[str, Any]) -> tuple[str, float]:
+    timestamp = str(event.get("attempted_at") or event.get("created_at") or "")
+    try:
+        mtime = float(event.get("_log_mtime") or 0.0)
+    except (TypeError, ValueError):
+        mtime = 0.0
+    return timestamp, mtime
+
+
 def terminal_submission_state(row: dict[str, Any], history: dict[str, dict[str, Any]]) -> str:
-    prior = history.get(str(row.get("source_url", ""))) or {}
+    prior = history.get(normalize_submission_url(str(row.get("source_url", "")))) or {}
     result = str(prior.get("result", ""))
     blocked_reason = str(prior.get("blocked_reason", ""))
-    if result == "already_applied":
-        return "already_applied"
+    if result in TERMINAL_SUBMISSION_RESULTS:
+        return result
     if blocked_reason == "inactive vacancy":
         return "inactive"
     return ""
