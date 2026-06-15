@@ -33,6 +33,7 @@ ROLE_TITLE_RE = re.compile(
     r"(?:\s*\([^)]+\))?)",
     re.I,
 )
+DJINNI_THREAD_ID_RE = re.compile(r"^https://djinni\.co/my/inbox/(\d+)/?(?:#.*)?$")
 INBOX_OFFERS_PATH = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 SUBMISSION_ATTEMPTS_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
 OBSERVATION_PATHS = [
@@ -140,7 +141,30 @@ def is_actionable_inbox_offer(row: dict[str, Any]) -> bool:
     self_reply_tokens = ["ви:", "you:", "relevant resume:", "best regards", "taras prystavskyj"]
     if any(token in text for token in [*system_tokens, *self_reply_tokens]):
         return False
+    url = str(row.get("source_url") or row.get("thread_url") or "")
+    normalized_url = normalize_djinni_thread_url(url)
+    if normalized_url and normalized_url in previously_replied_thread_urls():
+        return False
     return row.get("recommendation") in {"digest", "review"}
+
+
+def normalize_djinni_thread_url(url: str) -> str:
+    match = DJINNI_THREAD_ID_RE.match(url.strip())
+    if not match:
+        return ""
+    return f"https://djinni.co/my/inbox/{match.group(1)}/"
+
+
+def previously_replied_thread_urls() -> set[str]:
+    from recruiter_response_scan import load_sent_reply_events
+
+    return {
+        normalized
+        for event in load_sent_reply_events()
+        if event.get("sent") is True
+        for normalized in [normalize_djinni_thread_url(str(event.get("thread_url") or ""))]
+        if normalized
+    }
 
 
 def latest_submission_by_url() -> dict[str, dict[str, Any]]:

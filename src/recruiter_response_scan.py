@@ -20,8 +20,11 @@ from job_apply_config import ROOT, settings
 DEFAULT_OUTPUT = ROOT / "data" / "job_waves" / "recruiter_responses.jsonl"
 DEFAULT_AUTO_REPLY_LOG = ROOT / "data" / "job_waves" / "recruiter_auto_replies.jsonl"
 DEFAULT_INBOX_OFFERS = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
+DEFAULT_WEB_RUNS_DIR = ROOT / "data" / "job_waves" / "web_runs"
+DEFAULT_REPLY_LOCK_DIR = ROOT / "data" / "job_waves" / "recruiter_reply_locks"
 DEFAULT_THREAD_URLS: list[str] = []
 DJINNI_THREAD_RE = re.compile(r"^https://djinni\.co/my/inbox/\d+/(?:#.*)?$")
+DJINNI_THREAD_ID_RE = re.compile(r"^https://djinni\.co/my/inbox/(\d+)/?(?:#.*)?$")
 REJECTION_TOKENS = ["РІС–РґС…РёР»РµРЅРѕ", "can't offer", "cannot offer", "not move forward", "unfortunately"]
 ACTION_TOKENS = ["interview", "call", "meeting", "next step", "С‚РµС…РЅС–С‡РЅ", "СЃРїС–РІР±РµСЃС–Рґ"]
 
@@ -64,6 +67,14 @@ def explicit_thread_urls() -> list[str]:
 
 def is_djinni_thread_url(url: str) -> bool:
     return bool(DJINNI_THREAD_RE.match(url.strip()))
+
+
+def normalize_thread_url(url: str) -> str:
+    cleaned = url.strip()
+    match = DJINNI_THREAD_ID_RE.match(cleaned)
+    if not match:
+        return cleaned
+    return f"https://djinni.co/my/inbox/{match.group(1)}/"
 
 
 def inbox_thread_urls(path: Path = DEFAULT_INBOX_OFFERS) -> list[str]:
@@ -416,6 +427,11 @@ def message_digest(message: str) -> str:
     return hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
 
 
+def reply_dedupe_key(thread_url: str, message: str) -> str:
+    payload = f"{normalize_thread_url(thread_url)}\n{message_digest(message)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def load_auto_reply_log(path: Path = DEFAULT_AUTO_REPLY_LOG) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -430,21 +446,165 @@ def load_auto_reply_log(path: Path = DEFAULT_AUTO_REPLY_LOG) -> list[dict[str, A
     return rows
 
 
+def load_legacy_web_sent_reply_events(web_runs_dir: Path = DEFAULT_WEB_RUNS_DIR) -> list[dict[str, Any]]:
+    if not web_runs_dir.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for parent_log in web_runs_dir.glob("djinni_inbox_submit_*.jsonl"):
+        rows: list[dict[str, Any]] = []
+        for line in parent_log.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        for idx, row in enumerate(rows, start=1):
+            child_log = parent_log.with_name(f"{parent_log.stem}_{idx}.log")
+            if not child_log.exists():
+                continue
+            try:
+                child = json.loads(child_log.read_text(encoding="utf-8-sig", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if child.get("sent") is not True:
+                continue
+            url = str(row.get("source_url") or row.get("thread_url") or "")
+            if not is_djinni_thread_url(url):
+                continue
+            events.append(
+                {
+                    "schema": "job.recruiter_auto_reply_legacy_web_send.v0",
+                    "attempted_at": row.get("attempted_at", ""),
+                    "thread_url": normalize_thread_url(url),
+                    "raw_thread_url": url,
+                    "message_length": row.get("message_length"),
+                    "sent": True,
+                    "source_log": str(child_log),
+                }
+            )
+    return events
+
+
+def load_sent_reply_events(path: Path = DEFAULT_AUTO_REPLY_LOG) -> list[dict[str, Any]]:
+    return load_auto_reply_log(path) + load_legacy_web_sent_reply_events()
+
+
 def append_auto_reply_event(path: Path, event: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def sent_message_already(existing: list[dict[str, Any]], thread_url: str, message: str) -> bool:
+    normalized = normalize_thread_url(thread_url)
+    digest = message_digest(message)
+    length = len(message)
+    for event in existing:
+        if event.get("sent") is not True:
+            continue
+        if normalize_thread_url(str(event.get("thread_url") or "")) != normalized:
+            continue
+        event_digest = event.get("message_digest")
+        if event_digest and event_digest == digest:
+            return True
+        if not event_digest and event.get("message_length") == length:
+            return True
+    return False
+
+
 def already_auto_replied(existing: list[dict[str, Any]], row: RecruiterResponse) -> bool:
-    digest = message_digest(row.suggested_auto_reply)
-    return any(
-        event.get("thread_url") == row.thread_url
-        and event.get("auto_reply_intent") == row.auto_reply_intent
-        and event.get("message_digest") == digest
-        and event.get("sent") is True
-        for event in existing
-    )
+    return sent_message_already(existing, row.thread_url, row.suggested_auto_reply)
+
+
+def acquire_reply_lock(thread_url: str, message: str, lock_dir: Path = DEFAULT_REPLY_LOCK_DIR) -> Path | None:
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{reply_dedupe_key(thread_url, message)}.lock"
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "thread_url": normalize_thread_url(thread_url),
+                    "message_digest": message_digest(message),
+                    "message_length": len(message),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    return lock_path
+
+
+def release_reply_lock(lock_path: Path | None) -> None:
+    if not lock_path:
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def prepare_or_send_thank_you_once(
+    thread_url: str,
+    message: str,
+    *,
+    execute_send: bool = False,
+    delay_sec: float = 2.0,
+    log_path: Path = DEFAULT_AUTO_REPLY_LOG,
+    auto_reply_intent: str = "manual_review_reply",
+    record_event: bool = True,
+) -> dict[str, Any]:
+    normalized = normalize_thread_url(thread_url)
+    digest = message_digest(message)
+    base_event = {
+        "schema": "job.recruiter_auto_reply.v0",
+        "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source_site": "djinni",
+        "thread_url": normalized,
+        "raw_thread_url": thread_url,
+        "auto_reply_intent": auto_reply_intent,
+        "message_digest": digest,
+        "message_length": len(message),
+        "message": message,
+        "enabled": True,
+        "execute_send": execute_send,
+        "sent": False,
+    }
+    if execute_send and sent_message_already(load_sent_reply_events(log_path), thread_url, message):
+        event = {**base_event, "result": "skipped_already_sent"}
+        if record_event:
+            append_auto_reply_event(log_path, event)
+        return {"ok": True, "sent": False, "skipped": True, "reason": "already_sent_same_thread_message", **event}
+
+    lock_path = acquire_reply_lock(thread_url, message) if execute_send else None
+    if execute_send and lock_path is None:
+        event = {**base_event, "result": "skipped_send_in_progress"}
+        if record_event:
+            append_auto_reply_event(log_path, event)
+        return {"ok": True, "sent": False, "skipped": True, "reason": "send_in_progress_same_thread_message", **event}
+    try:
+        if execute_send and sent_message_already(load_sent_reply_events(log_path), thread_url, message):
+            event = {**base_event, "result": "skipped_already_sent_after_lock"}
+            if record_event:
+                append_auto_reply_event(log_path, event)
+            return {"ok": True, "sent": False, "skipped": True, "reason": "already_sent_same_thread_message", **event}
+        result = prepare_or_send_thank_you(thread_url, message, execute_send=execute_send, delay_sec=delay_sec)
+        event = {
+            **base_event,
+            "result": "sent" if result.get("sent") else "prepared_only",
+            "sent": bool(result.get("sent")),
+            "browser_result": result,
+        }
+        if record_event:
+            append_auto_reply_event(log_path, event)
+        return {**result, "thread_url": normalized, "message_digest": digest, "dedupe_logged": True}
+    finally:
+        release_reply_lock(lock_path)
 
 
 def run_auto_replies(
@@ -458,8 +618,8 @@ def run_auto_replies(
     delay_sec: float = 2.0,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    existing = load_auto_reply_log(log_path)
-    allowed_threads = set(allowed_thread_urls or [])
+    existing = load_sent_reply_events(log_path)
+    allowed_threads = {normalize_thread_url(url) for url in (allowed_thread_urls or [])}
     for row in rows:
         if not row.auto_reply_allowed or row.confidence < threshold or not row.suggested_auto_reply:
             continue
@@ -467,7 +627,8 @@ def run_auto_replies(
             "schema": "job.recruiter_auto_reply.v0",
             "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "source_site": row.source_site,
-            "thread_url": row.thread_url,
+            "thread_url": normalize_thread_url(row.thread_url),
+            "raw_thread_url": row.thread_url,
             "company": row.company,
             "role": row.role,
             "confidence": row.confidence,
@@ -490,7 +651,7 @@ def run_auto_replies(
             append_auto_reply_event(log_path, event)
             events.append(event)
             continue
-        if row.thread_url not in allowed_threads:
+        if normalize_thread_url(row.thread_url) not in allowed_threads:
             event = {**base_event, "result": "blocked_thread_not_allowlisted_for_auto_send"}
             append_auto_reply_event(log_path, event)
             events.append(event)
@@ -501,15 +662,28 @@ def run_auto_replies(
             events.append(event)
             continue
         try:
-            send_result = prepare_or_send_thank_you(
+            send_result = prepare_or_send_thank_you_once(
                 row.thread_url,
                 row.suggested_auto_reply,
                 execute_send=execute_send,
                 delay_sec=delay_sec,
+                log_path=log_path,
+                auto_reply_intent=row.auto_reply_intent,
+                record_event=False,
             )
         except Exception as exc:
             event = {**base_event, "result": "error", "error": f"{type(exc).__name__}: {exc}"}
         else:
+            if send_result.get("skipped"):
+                event = {
+                    **base_event,
+                    "result": str(send_result.get("result") or send_result.get("reason") or "skipped"),
+                    "sent": False,
+                    "browser_result": send_result,
+                }
+                append_auto_reply_event(log_path, event)
+                events.append(event)
+                continue
             event = {
                 **base_event,
                 "result": "sent" if send_result.get("sent") else "prepared_only",
@@ -692,7 +866,7 @@ def main() -> int:
         if args.draft_thank_you:
             print(message)
             return 0
-        result = prepare_or_send_thank_you(
+        result = prepare_or_send_thank_you_once(
             thread_url,
             message,
             execute_send=bool(args.send_thank_you),

@@ -21,7 +21,7 @@ from job_scan_sources import SUMMARY_PATH as ALL_SOURCES_SUMMARY_PATH
 from job_scan_sources import format_scan_summary, run_all_sources_scan
 from job_platforms.dou import is_dou_listing_url
 from job_platforms.progress import build_progress_snapshot
-from recruiter_response_scan import is_djinni_thread_url
+from recruiter_response_scan import is_djinni_thread_url, message_digest, normalize_thread_url
 from resume_index import build_resume_index
 from vacancy_pipeline import OBSERVATION_PATHS, build_candidate_batch, candidate_summary
 
@@ -529,10 +529,16 @@ def approved_review_rows(batch: Path) -> list[dict[str, str]]:
     with batch.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
     result = []
+    seen: set[tuple[str, str]] = set()
     for row in rows:
         if not is_review_send_row(row):
             continue
         if row.get("approved_to_submit") == "true" and row.get("final_submit_allowed") == "true":
+            message = (row.get("message") or "").strip()
+            key = (normalize_thread_url(row.get("url") or ""), message_digest(message))
+            if key in seen:
+                continue
+            seen.add(key)
             result.append(dict(row))
     return result
 
@@ -632,10 +638,12 @@ def launch_review_runs(batch: Path, mode: str, stamp: str) -> list[dict[str, str
                     "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "site": "djinni_inbox",
                     "source_url": row.get("url", ""),
+                    "thread_url": normalize_thread_url(row.get("url", "")),
                     "company": row.get("company", ""),
                     "title": row.get("title", ""),
                     "result": "dry_run_ok",
                     "message_length": len(row.get("message", "")),
+                    "message_digest": message_digest(row.get("message", "")),
                 },
             )
         log_path.write_text(f"dry-run ok for {len(rows)} Djinni inbox review row(s)\n", encoding="utf-8")
@@ -659,6 +667,7 @@ def launch_review_runs(batch: Path, mode: str, stamp: str) -> list[dict[str, str
                     "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "site": "djinni_inbox",
                     "source_url": row.get("url", ""),
+                    "thread_url": normalize_thread_url(row.get("url", "")),
                     "result": "blocked_validation",
                     "blocked_reason": "empty review message",
                 },
@@ -687,12 +696,14 @@ def launch_review_runs(batch: Path, mode: str, stamp: str) -> list[dict[str, str
                 "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "site": "djinni_inbox",
                 "source_url": row.get("url", ""),
+                "thread_url": normalize_thread_url(row.get("url", "")),
                 "company": row.get("company", ""),
                 "title": row.get("title", ""),
                 "result": "started",
                 "mode": mode,
                 "pid": proc.pid,
                 "message_length": len(message),
+                "message_digest": message_digest(message),
             },
         )
     log_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")

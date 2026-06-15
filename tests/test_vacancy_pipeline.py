@@ -142,6 +142,19 @@ class VacancyPipelineTests(unittest.TestCase):
         self.assertIn("banned phrase: .pdf", errors)
         self.assertIn("banned phrase: review artifacts", errors)
 
+    def test_inbox_offer_is_not_actionable_after_prior_reply_to_same_thread(self) -> None:
+        row = {
+            "source_url": "https://djinni.co/my/inbox/25880672/#last",
+            "title": "Senior Python AI Engineer",
+            "snippet": "Recruiter message",
+            "recommendation": "review",
+        }
+
+        with patch.object(vacancy_pipeline, "previously_replied_thread_urls", return_value={"https://djinni.co/my/inbox/25880672/"}):
+            actionable = vacancy_pipeline.is_actionable_inbox_offer(row)
+
+        self.assertFalse(actionable)
+
 
 if __name__ == "__main__":
     unittest.main()

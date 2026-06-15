@@ -19,9 +19,13 @@ from recruiter_response_scan import (  # noqa: E402
     inbox_thread_urls,
     is_djinni_thread_url,
     latest_response_summary,
+    load_legacy_web_sent_reply_events,
     message_digest,
+    normalize_thread_url,
     plan_auto_reply,
+    prepare_or_send_thank_you_once,
     run_auto_replies,
+    sent_message_already,
 )
 
 
@@ -179,6 +183,12 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
         self.assertFalse(is_djinni_thread_url("https://djinni.co/my/inbox/"))
         self.assertFalse(is_djinni_thread_url("https://djinni.co/jobs/831059-full-stack/"))
 
+    def test_thread_url_normalization_ignores_fragment(self) -> None:
+        self.assertEqual(
+            normalize_thread_url("https://djinni.co/my/inbox/25880672/#last"),
+            "https://djinni.co/my/inbox/25880672/",
+        )
+
     def test_latest_response_summary_uses_latest_rejected_row(self) -> None:
         rows = [
             {
@@ -222,6 +232,67 @@ class RecruiterAutoReplyPolicyTest(unittest.TestCase):
         ]
 
         self.assertTrue(already_auto_replied(existing, Row()))
+
+    def test_sent_message_dedupe_uses_normalized_thread_url(self) -> None:
+        existing = [
+            {
+                "thread_url": "https://djinni.co/my/inbox/25880672/",
+                "message_digest": message_digest("Thanks"),
+                "sent": True,
+            }
+        ]
+
+        self.assertTrue(sent_message_already(existing, "https://djinni.co/my/inbox/25880672/#last", "Thanks"))
+
+    def test_legacy_web_sent_reply_events_are_loaded_for_dedupe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            web_runs = Path(tmp)
+            parent = web_runs / "djinni_inbox_submit_20260612_201204.jsonl"
+            parent.write_text(
+                json.dumps(
+                    {
+                        "attempted_at": "2026-06-12T20:12:04+0300",
+                        "source_url": "https://djinni.co/my/inbox/25880672/#last",
+                        "message_length": 383,
+                        "result": "started",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            child = web_runs / "djinni_inbox_submit_20260612_201204_1.log"
+            child.write_text(json.dumps({"ok": True, "sent": True}), encoding="utf-8")
+
+            events = load_legacy_web_sent_reply_events(web_runs)
+
+        self.assertEqual(events[0]["thread_url"], "https://djinni.co/my/inbox/25880672/")
+        self.assertTrue(sent_message_already(events, "https://djinni.co/my/inbox/25880672/#last", "x" * 383))
+
+    def test_manual_send_path_skips_existing_sent_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "auto.jsonl"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "thread_url": "https://djinni.co/my/inbox/25880672/",
+                        "message_digest": message_digest("Thanks"),
+                        "sent": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("recruiter_response_scan.prepare_or_send_thank_you") as prepare:
+                result = prepare_or_send_thank_you_once(
+                    "https://djinni.co/my/inbox/25880672/#last",
+                    "Thanks",
+                    execute_send=True,
+                    log_path=log_path,
+                )
+
+        prepare.assert_not_called()
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "already_sent_same_thread_message")
 
     def test_auto_reply_dry_run_does_not_touch_browser(self) -> None:
         row = RecruiterResponse(

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import job_apply_web  # noqa: E402
-from job_apply_web import approved_rows_by_site, submit_blocker, supported_submit_site, update_batch_approvals  # noqa: E402
+from job_apply_web import approved_review_rows, approved_rows_by_site, submit_blocker, supported_submit_site, update_batch_approvals  # noqa: E402
 from job_apply_web import supported_label  # noqa: E402
 
 
@@ -298,6 +298,21 @@ class JobApplyWebTests(unittest.TestCase):
                 if line.strip()
             ]
             self.assertEqual(log_rows[0]["result"], "dry_run_ok")
+            self.assertIn("message_digest", log_rows[0])
+
+    def test_duplicate_djinni_inbox_review_rows_are_deduped_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            first = row("djinni_inbox", "https://djinni.co/my/inbox/25880672/#last")
+            second = row("djinni_inbox", "https://djinni.co/my/inbox/25880672/")
+            for item in [first, second]:
+                item["approved_to_submit"] = "true"
+                item["final_submit_allowed"] = "true"
+            write_batch(batch, [first, second])
+
+            rows = approved_review_rows(batch)
+
+        self.assertEqual(len(rows), 1)
 
     def test_approve_all_marks_only_supported_rows_and_adds_live_columns(self) -> None:
         with tempfile.TemporaryDirectory() as td:
