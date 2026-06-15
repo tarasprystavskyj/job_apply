@@ -315,11 +315,14 @@ def fill_form(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
   if (expected.linkedinPolicy === "fill_url") {{
     const fields = Array.from(root.querySelectorAll("input,textarea")).filter(visible);
     const linkedinField = fields.find(e => /linkedin|profile|social|url|contact|contacts/i.test(`${{e.name}} ${{e.id}} ${{e.placeholder}} ${{e.getAttribute("aria-label") || ""}}`));
-    if (!linkedinField) return {{ok: false, reason: "linkedin_policy=fill_url but no visible LinkedIn/profile field"}};
-    linkedinField.value = expected.linkedin;
-    linkedinField.dispatchEvent(new Event("input", {{bubbles: true}}));
-    linkedinField.dispatchEvent(new Event("change", {{bubbles: true}}));
-    linkedinFilled = {{name: linkedinField.name || "", id: linkedinField.id || "", value: linkedinField.value}};
+    if (linkedinField) {{
+      linkedinField.value = expected.linkedin;
+      linkedinField.dispatchEvent(new Event("input", {{bubbles: true}}));
+      linkedinField.dispatchEvent(new Event("change", {{bubbles: true}}));
+      linkedinFilled = {{name: linkedinField.name || "", id: linkedinField.id || "", value: linkedinField.value}};
+    }} else {{
+      linkedinFilled = {{skipped: true, reason: "no visible optional LinkedIn/profile field"}};
+    }}
   }}
 
   const filledAnswers = [];
@@ -390,7 +393,7 @@ def validate_before_submit(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any
       .filter(e => /linkedin|profile|social|url|contact|contacts/i.test(`${{e.name}} ${{e.id}} ${{e.placeholder}} ${{e.getAttribute("aria-label") || ""}}`));
     details.linkedinFields = linkedinFields.map(e => ({{name: e.name || "", id: e.id || "", value: e.value || ""}}));
     if (!linkedinFields.length) {{
-      errors.push("linkedin_policy=fill_url but no visible LinkedIn/profile field");
+      details.linkedinOptionalSkipped = true;
     }} else if (!linkedinFields.some(e => norm(e.value) === norm(expected.linkedin))) {{
       errors.push("linkedin was not transmitted to form");
     }}

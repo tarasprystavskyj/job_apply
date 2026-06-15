@@ -159,6 +159,40 @@ class DouCsvApplyTest(unittest.TestCase):
             event = json.loads(log_path.read_text(encoding="utf-8").strip())
             self.assertEqual(event["result"], "pre_submit_validation_ok")
 
+    def test_fill_form_treats_missing_linkedin_field_as_optional_skip(self) -> None:
+        fake_tab = Mock()
+        fake_tab.eval.return_value = {"ok": True}
+
+        dou_csv_apply.fill_form(
+            fake_tab,
+            row(
+                linkedin_policy="fill_url",
+                linkedin="https://www.linkedin.com/in/taras-prystavskyj/",
+            ),
+        )
+
+        expression = fake_tab.eval.call_args.args[0]
+        self.assertIn('linkedinFilled = {skipped: true, reason: "no visible optional LinkedIn/profile field"}', expression)
+        self.assertNotIn('return {ok: false, reason: "linkedin_policy=fill_url but no visible LinkedIn/profile field"}', expression)
+
+    def test_presubmit_missing_linkedin_field_does_not_bypass_required_fields(self) -> None:
+        fake_tab = Mock()
+        fake_tab.eval.return_value = {"ok": True}
+
+        dou_csv_apply.validate_before_submit(
+            fake_tab,
+            row(
+                linkedin_policy="fill_url",
+                linkedin="https://www.linkedin.com/in/taras-prystavskyj/",
+            ),
+        )
+
+        expression = fake_tab.eval.call_args.args[0]
+        self.assertIn("details.linkedinOptionalSkipped = true", expression)
+        self.assertNotIn('errors.push("linkedin_policy=fill_url but no visible LinkedIn/profile field")', expression)
+        self.assertIn("const requiredEmpty = Array.from(root.querySelectorAll", expression)
+        self.assertIn('if (requiredEmpty.length) errors.push("visible required fields are empty")', expression)
+
     def test_execute_submits_only_after_presubmit_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "dou.jsonl"

@@ -266,9 +266,22 @@ def navigate_to_apply_form(tab: CdpTab) -> dict[str, Any]:
     const s = getComputedStyle(e), r = e.getBoundingClientRect();
     return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
   };
+  const submitLike = root => Array.from(root.querySelectorAll("button,input[type=submit],input[type=button]"))
+    .filter(visible)
+    .some(button => {
+      const text = (button.innerText || button.value || "").toLowerCase();
+      return text.includes("submit") || text.includes("send") || text.includes("apply") ||
+        text.includes("\u043d\u0430\u0434\u0456\u0441\u043b") ||
+        text.includes("\u0432\u0456\u0434\u0433\u0443\u043a");
+    });
+  const profileResumeEvidence = root => {
+    const controls = Array.from(root.querySelectorAll("select,input[type=radio]:checked,input[type=checkbox]:checked"));
+    return controls.length > 0;
+  };
   const hasUsefulForm = () =>
     Array.from(document.querySelectorAll("form")).some(form =>
-      form.querySelector("textarea,input[type=email],input[type=tel],input[type=file]"));
+      form.querySelector("textarea,input[type=email],input[type=tel],input[type=file]") ||
+      (submitLike(form) && profileResumeEvidence(form)));
   if (hasUsefulForm()) return {ok: true, navigated: false, reason: "application-like form already visible"};
 
   const linkCandidates = Array.from(document.querySelectorAll("a[href]"))
@@ -335,9 +348,41 @@ def fill_form(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, Any]:
     const s = getComputedStyle(e), r = e.getBoundingClientRect();
     return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
   }};
-  const forms = Array.from(document.querySelectorAll("form")).filter(visible);
-  const form = forms.find(f => f.querySelector("textarea,input[type=email],input[type=tel],input[type=file]")) || forms[0];
-  if (!form) return {{ok: false, reason: "no visible application form"}};
+  const norm = value => (value || "").trim();
+  const profileResumeOnly = expected.messagePolicy === "profile_resume_only" && expected.profileResumeOnlyAllowed;
+  const submitLike = root => Array.from(root.querySelectorAll("button,input[type=submit],input[type=button]"))
+    .filter(visible)
+    .some(button => {{
+      const text = (button.innerText || button.value || "").toLowerCase();
+      return text.includes("submit") || text.includes("send") || text.includes("apply") ||
+        text.includes("\u043d\u0430\u0434\u0456\u0441\u043b") ||
+        text.includes("\u0432\u0456\u0434\u0433\u0443\u043a");
+    }});
+  const selectedResumeTexts = root => {{
+    const selectedTexts = [];
+    for (const select of Array.from(root.querySelectorAll("select"))) {{
+      selectedTexts.push(...Array.from(select.selectedOptions || []).map(o => norm(o.text)));
+    }}
+    for (const checked of Array.from(root.querySelectorAll("input[type=radio]:checked,input[type=checkbox]:checked"))) {{
+      const label = checked.closest("label") || (checked.id ? document.querySelector(`label[for="${{CSS.escape(checked.id)}}"]`) : null);
+      if (label) selectedTexts.push(norm(label.innerText));
+    }}
+    return selectedTexts.filter(Boolean);
+  }};
+  const profileResumeEvidence = root => {{
+    const selectedTexts = selectedResumeTexts(root);
+    return selectedTexts.length > 0;
+  }};
+  const roots = [
+    ...Array.from(document.querySelectorAll("form")),
+    ...Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"],.modal,.modal-content,[class*="modal"]'))
+  ].filter((root, index, all) => root && visible(root) && all.indexOf(root) === index);
+  const form = roots.find(root => root.querySelector("textarea,input[type=email],input[type=tel],input[type=file]")) ||
+    (profileResumeOnly ? roots.find(root => submitLike(root) && profileResumeEvidence(root)) : null);
+  if (!form) {{
+    if (profileResumeOnly) return {{ok: false, reason: "profile_resume_only requested but no visible selected profile/resume controls"}};
+    return {{ok: false, reason: "no visible application form"}};
+  }}
 
   const textareas = Array.from(form.querySelectorAll("textarea")).filter(visible);
   const messageField = textareas.find(t => {{
@@ -345,8 +390,10 @@ def fill_form(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, Any]:
     return info.includes("message") || info.includes("letter") || info.includes("comment") ||
       info.includes("\u043b\u0438\u0441\u0442") || info.includes("\u043f\u043e\u0432\u0456\u0434");
   }}) || textareas[0];
-  const profileResumeOnly = expected.messagePolicy === "profile_resume_only" && expected.profileResumeOnlyAllowed;
   if (!messageField && !profileResumeOnly) return {{ok: false, reason: "no visible message textarea"}};
+  if (!messageField && profileResumeOnly && !profileResumeEvidence(form)) {{
+    return {{ok: false, reason: "profile_resume_only requested but no visible selected profile/resume controls"}};
+  }}
   if (messageField) {{
     messageField.value = expected.message;
     messageField.dispatchEvent(new Event("input", {{bubbles: true}}));
@@ -375,14 +422,7 @@ def fill_form(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, Any]:
 
   let approvedResumeMatched = false;
   if (expected.resumePolicy === "use_selected_resume") {{
-    const selectedTexts = [];
-    for (const select of Array.from(form.querySelectorAll("select"))) {{
-      selectedTexts.push(...Array.from(select.selectedOptions || []).map(o => o.text || ""));
-    }}
-    for (const checked of Array.from(form.querySelectorAll("input[type=radio]:checked,input[type=checkbox]:checked"))) {{
-      const label = checked.closest("label") || (checked.id ? document.querySelector(`label[for="${{CSS.escape(checked.id)}}"]`) : null);
-      if (label) selectedTexts.push(label.innerText || "");
-    }}
+    const selectedTexts = selectedResumeTexts(form);
     approvedResumeMatched = selectedTexts.some(text => text.includes(expected.approvedResumeName));
     if (!approvedResumeMatched) {{
       return {{ok: false, reason: "selected Work.ua resume/profile does not match approved_resume_name"}};
@@ -424,18 +464,52 @@ def validate_before_submit(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, 
   const norm = value => (value || "").trim();
   const errors = [];
   const details = {{}};
-  const forms = Array.from(document.querySelectorAll("form")).filter(visible);
-  const form = forms.find(f => f.querySelector("textarea,input[type=email],input[type=tel],input[type=file]")) || forms[0];
-  if (!form) return {{ok: false, errors: ["no visible application form"], details}};
+  details.profileResumeOnly = expected.messagePolicy === "profile_resume_only" && expected.profileResumeOnlyAllowed;
+  const submitLike = root => Array.from(root.querySelectorAll("button,input[type=submit],input[type=button]"))
+    .filter(visible)
+    .some(button => {{
+      const text = (button.innerText || button.value || "").toLowerCase();
+      return text.includes("submit") || text.includes("send") || text.includes("apply") ||
+        text.includes("\u043d\u0430\u0434\u0456\u0441\u043b") ||
+        text.includes("\u0432\u0456\u0434\u0433\u0443\u043a");
+    }});
+  const selectedResumeTexts = root => {{
+    const selectedTexts = [];
+    for (const select of Array.from(root.querySelectorAll("select"))) {{
+      selectedTexts.push(...Array.from(select.selectedOptions || []).map(o => norm(o.text)));
+    }}
+    for (const checked of Array.from(root.querySelectorAll("input[type=radio]:checked,input[type=checkbox]:checked"))) {{
+      const label = checked.closest("label") || (checked.id ? document.querySelector(`label[for="${{CSS.escape(checked.id)}}"]`) : null);
+      if (label) selectedTexts.push(norm(label.innerText));
+    }}
+    return selectedTexts.filter(Boolean);
+  }};
+  const profileResumeEvidence = root => {{
+    const selectedTexts = selectedResumeTexts(root);
+    return selectedTexts.length > 0;
+  }};
+  const roots = [
+    ...Array.from(document.querySelectorAll("form")),
+    ...Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"],.modal,.modal-content,[class*="modal"]'))
+  ].filter((root, index, all) => root && visible(root) && all.indexOf(root) === index);
+  const form = roots.find(root => root.querySelector("textarea,input[type=email],input[type=tel],input[type=file]")) ||
+    (details.profileResumeOnly ? roots.find(root => submitLike(root) && profileResumeEvidence(root)) : null);
+  if (!form) {{
+    const reason = details.profileResumeOnly
+      ? "profile_resume_only requested but no visible selected profile/resume controls"
+      : "no visible application form";
+    return {{ok: false, errors: [reason], details}};
+  }}
 
   const textareas = Array.from(form.querySelectorAll("textarea")).filter(visible);
   const messageMatches = textareas.some(t => norm(t.value) === norm(expected.message));
   details.messageLength = expected.message.length;
   details.textareaCount = textareas.length;
-  details.profileResumeOnly = expected.messagePolicy === "profile_resume_only" && expected.profileResumeOnlyAllowed;
+  details.profileResumeEvidence = profileResumeEvidence(form);
   if (!messageMatches) {{
     if (textareas.length === 0 && details.profileResumeOnly) {{
       details.messageSkippedByPolicy = true;
+      if (!details.profileResumeEvidence) errors.push("profile_resume_only requested but no visible selected profile/resume controls");
     }} else {{
       errors.push("exact approved message was not transmitted to a visible textarea");
     }}
@@ -459,14 +533,7 @@ def validate_before_submit(tab: CdpTab, row: WorkUaApplicationRow) -> dict[str, 
     errors.push("resume policy forbids upload but file input has files");
   }}
   if (expected.resumePolicy === "use_selected_resume") {{
-    const selectedTexts = [];
-    for (const select of Array.from(form.querySelectorAll("select"))) {{
-      selectedTexts.push(...Array.from(select.selectedOptions || []).map(o => o.text || ""));
-    }}
-    for (const checked of Array.from(form.querySelectorAll("input[type=radio]:checked,input[type=checkbox]:checked"))) {{
-      const label = checked.closest("label") || (checked.id ? document.querySelector(`label[for="${{CSS.escape(checked.id)}}"]`) : null);
-      if (label) selectedTexts.push(label.innerText || "");
-    }}
+    const selectedTexts = selectedResumeTexts(form);
     const matched = selectedTexts.some(text => text.includes(expected.approvedResumeName));
     details.approvedResumeMatched = matched;
     if (!matched) errors.push("selected Work.ua resume/profile does not match approved_resume_name");
@@ -497,8 +564,33 @@ def submit_form(tab: CdpTab) -> dict[str, Any]:
     const s = getComputedStyle(e), r = e.getBoundingClientRect();
     return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
   };
-  const forms = Array.from(document.querySelectorAll("form")).filter(visible);
-  const form = forms.find(f => f.querySelector("textarea,input[type=email],input[type=tel],input[type=file]")) || forms[0];
+  const norm = value => (value || "").trim();
+  const submitLike = root => Array.from(root.querySelectorAll("button,input[type=submit],input[type=button]"))
+    .filter(visible)
+    .some(item => {
+      const text = (item.innerText || item.value || "").toLowerCase();
+      return text.includes("submit") || text.includes("send") || text.includes("apply") ||
+        text.includes("\u043d\u0430\u0434\u0456\u0441\u043b") ||
+        text.includes("\u0432\u0456\u0434\u0433\u0443\u043a");
+    });
+  const selectedResumeTexts = root => {
+    const selectedTexts = [];
+    for (const select of Array.from(root.querySelectorAll("select"))) {
+      selectedTexts.push(...Array.from(select.selectedOptions || []).map(o => norm(o.text)));
+    }
+    for (const checked of Array.from(root.querySelectorAll("input[type=radio]:checked,input[type=checkbox]:checked"))) {
+      const label = checked.closest("label") || (checked.id ? document.querySelector(`label[for="${CSS.escape(checked.id)}"]`) : null);
+      if (label) selectedTexts.push(norm(label.innerText));
+    }
+    return selectedTexts.filter(Boolean);
+  };
+  const profileResumeEvidence = root => selectedResumeTexts(root).length > 0;
+  const roots = [
+    ...Array.from(document.querySelectorAll("form")),
+    ...Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"],.modal,.modal-content,[class*="modal"]'))
+  ].filter((root, index, all) => root && visible(root) && all.indexOf(root) === index);
+  const form = roots.find(root => root.querySelector("textarea,input[type=email],input[type=tel],input[type=file]")) ||
+    roots.find(root => submitLike(root) && profileResumeEvidence(root));
   if (!form) return {ok: false, submitted: false, reason: "no visible application form"};
   const button = Array.from(form.querySelectorAll("button,input[type=submit]")).filter(visible).find(item => {
     const text = (item.innerText || item.value || "").toLowerCase();

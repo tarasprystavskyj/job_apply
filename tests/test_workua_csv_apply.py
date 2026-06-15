@@ -12,7 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from workua_csv_apply import process_row, read_rows, validate_before_submit, validate_row  # noqa: E402
+from workua_csv_apply import fill_form, process_row, read_rows, submit_form, validate_before_submit, validate_row  # noqa: E402
 
 
 FIELDNAMES = [
@@ -243,6 +243,7 @@ class WorkUaCsvApplyTest(unittest.TestCase):
                         "details": {"profileResumeOnly": True, "messageSkippedByPolicy": True, "hasSubmitButton": True},
                     },
                 ),
+                patch("workua_csv_apply.submit_form", side_effect=AssertionError("final submit must not be clicked")),
             ):
                 rc = process_row(
                     row,
@@ -287,6 +288,77 @@ class WorkUaCsvApplyTest(unittest.TestCase):
 
             self.assertIn("messageSkippedByPolicy", tab.expression)
             self.assertIn("profile_resume_only", tab.expression)
+
+    def test_fill_form_script_requires_explicit_profile_resume_only_for_no_textarea(self) -> None:
+        class CaptureTab:
+            expression = ""
+
+            def eval(self, expression: str) -> dict[str, object]:
+                self.expression = expression
+                return {"ok": False, "reason": "captured"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "approved.csv"
+            write_csv(csv_path, [approved_row()])
+            row = read_rows(csv_path)[0]
+            tab = CaptureTab()
+
+            fill_form(tab, row)  # type: ignore[arg-type]
+
+            self.assertIn('document.querySelectorAll(\'[role="dialog"],[aria-modal="true"],.modal,.modal-content,[class*="modal"]\')', tab.expression)
+            self.assertIn('if (!messageField && !profileResumeOnly) return {ok: false, reason: "no visible message textarea"}', tab.expression)
+            self.assertIn("profile_resume_only requested but no visible selected profile/resume controls", tab.expression)
+            self.assertIn("submitLike(root) && profileResumeEvidence(root)", tab.expression)
+            self.assertNotIn('text.includes("resume")', tab.expression)
+            self.assertNotIn("document.body", tab.expression)
+
+    def test_validate_before_submit_script_keeps_profile_resume_only_presubmit_strict(self) -> None:
+        class CaptureTab:
+            expression = ""
+
+            def eval(self, expression: str) -> dict[str, object]:
+                self.expression = expression
+                return {"ok": True, "errors": [], "details": {}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "profile_only_ok.csv"
+            write_csv(
+                csv_path,
+                [
+                    approved_row(
+                        resume_policy="use_workua_profile",
+                        message_policy="profile_resume_only",
+                        profile_resume_only_allowed="true",
+                    )
+                ],
+            )
+            row = read_rows(csv_path)[0]
+            tab = CaptureTab()
+
+            validate_before_submit(tab, row)  # type: ignore[arg-type]
+
+            self.assertIn("profileResumeEvidence", tab.expression)
+            self.assertIn("messageSkippedByPolicy", tab.expression)
+            self.assertIn("no visible submit/send button in application form", tab.expression)
+            self.assertIn("submit/send button is disabled", tab.expression)
+            self.assertNotIn('text.includes("resume")', tab.expression)
+
+    def test_submit_form_does_not_use_body_level_fallback(self) -> None:
+        class CaptureTab:
+            expression = ""
+
+            def eval(self, expression: str) -> dict[str, object]:
+                self.expression = expression
+                return {"ok": False, "submitted": False}
+
+        tab = CaptureTab()
+
+        submit_form(tab)  # type: ignore[arg-type]
+
+        self.assertIn('document.querySelectorAll(\'[role="dialog"],[aria-modal="true"],.modal,.modal-content,[class*="modal"]\')', tab.expression)
+        self.assertIn("profileResumeEvidence(root)", tab.expression)
+        self.assertIn("submitLike(root) && profileResumeEvidence(root)", tab.expression)
+        self.assertNotIn("document.body", tab.expression)
 
 
 if __name__ == "__main__":
