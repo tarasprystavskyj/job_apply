@@ -339,6 +339,47 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertIn("linkedin_policy", fields)
             self.assertIn("upload_allowed", fields)
 
+    def test_launch_routes_only_exact_djinni_jobs_to_djinni_submitter(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            rows = [
+                row("djinni", "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/"),
+                row("djinni_inbox", "https://djinni.co/my/inbox/25880123/#last"),
+                row("dou", "https://relocate.dou.ua/jobs/?category=Python"),
+            ]
+            for item in rows:
+                item["approved_to_submit"] = "true"
+                item["final_submit_allowed"] = "true"
+            write_batch(batch, rows)
+
+            class FakeProcess:
+                pid = 12345
+
+            popen_commands: list[list[str]] = []
+
+            def fake_popen(cmd: list[str], **kwargs: object) -> FakeProcess:
+                popen_commands.append(cmd)
+                return FakeProcess()
+
+            with (
+                patch.object(job_apply_web, "WEB_RUNS_DIR", Path(td)),
+                patch.object(job_apply_web.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                jobs = job_apply_web.launch_approved_runs(batch, "dry-run")
+
+            grouped = approved_rows_by_site(batch)
+            self.assertEqual([row["url"] for row in grouped["djinni"]], ["https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/"])
+            self.assertEqual(grouped["dou"], [])
+            self.assertEqual([job["site"] for job in jobs], ["djinni", "djinni_inbox"])
+            self.assertEqual(len(popen_commands), 1)
+            self.assertIn("djinni_csv_apply.py", popen_commands[0][1])
+            csv_path = Path(str(jobs[0]["csv"]))
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+                submitted_rows = list(csv.DictReader(f))
+            self.assertEqual(len(submitted_rows), 1)
+            self.assertEqual(submitted_rows[0]["site"], "djinni")
+            self.assertTrue(submitted_rows[0]["url"].startswith("https://djinni.co/jobs/"))
+
     def test_approved_rows_are_normalized_for_site_specific_submitters(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             batch = Path(td) / "batch.csv"

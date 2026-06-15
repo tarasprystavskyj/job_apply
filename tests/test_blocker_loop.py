@@ -161,6 +161,49 @@ class BlockerLoopTests(unittest.TestCase):
         self.assertEqual(blockers[0]["site"], "workua")
         self.assertEqual(blockers[0]["category"], "site_changed_or_no_apply_surface")
 
+    def test_wrong_submitter_route_djinni_validation_is_suppressed(self) -> None:
+        blockers = blocker_loop.collect_unresolved_blockers(
+            [
+                {
+                    "site": "dou",
+                    "source_url": "https://relocate.dou.ua/jobs/?category=Python",
+                    "result": "blocked_validation",
+                    "errors": [
+                        "only site=djinni is supported by this script",
+                        "url must be a Djinni job URL",
+                    ],
+                    "attempted_at": "2026-06-15T10:00:00+0300",
+                },
+                {
+                    "site": "djinni_inbox",
+                    "source_url": "https://djinni.co/my/inbox/25880123/#last",
+                    "result": "blocked_validation",
+                    "blocked_reason": "only site=djinni is supported by this script; url must be a Djinni job URL",
+                    "attempted_at": "2026-06-15T10:01:00+0300",
+                },
+            ]
+        )
+
+        self.assertEqual(blockers, [])
+
+    def test_real_validation_blocker_stays_unresolved(self) -> None:
+        blockers = blocker_loop.collect_unresolved_blockers(
+            [
+                {
+                    "site": "djinni",
+                    "source_url": "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/",
+                    "result": "blocked_validation",
+                    "errors": ["linkedin is required", "final_submit_allowed must be true for execute"],
+                    "attempted_at": "2026-06-15T10:00:00+0300",
+                }
+            ]
+        )
+
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0]["site"], "djinni")
+        self.assertEqual(blockers[0]["category"], "validation_or_approval_gate")
+        self.assertIn("linkedin is required", blockers[0]["blocked_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

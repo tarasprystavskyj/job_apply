@@ -33,6 +33,7 @@ BLOCKED_RESULTS = {
     "blocked_presave_validation",
 }
 RESOLVED_RESULTS = {"submitted_success", "submitted_success_inferred", "already_applied"}
+DJINNI_WRONG_SUBMITTER_ROUTE_REASON = "only site=djinni is supported by this script; url must be a djinni job url"
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -123,6 +124,8 @@ def blocker_reason(event: dict[str, Any]) -> str:
 def classify_blocker(event: dict[str, Any]) -> str:
     reason = blocker_reason(event).lower()
     result = str(event.get("result") or "").lower()
+    if is_stale_wrong_submitter_route(event):
+        return "stale_wrong_submitter_route"
     if "profile update required" in reason:
         return "profile_update_required"
     if "inactive vacancy" in reason or result == "blocked_inactive":
@@ -138,6 +141,19 @@ def classify_blocker(event: dict[str, Any]) -> str:
     if "no visible" in reason or "application surface" in reason or "no apply" in result:
         return "site_changed_or_no_apply_surface"
     return "unknown_blocker"
+
+
+def is_djinni_job_url(url: str) -> bool:
+    return url.lower().startswith("https://djinni.co/jobs/")
+
+
+def is_stale_wrong_submitter_route(event: dict[str, Any]) -> bool:
+    reason = blocker_reason(event).lower()
+    if DJINNI_WRONG_SUBMITTER_ROUTE_REASON not in reason:
+        return False
+    site = str(event.get("site") or "").strip().lower()
+    url = event_url(event)
+    return site != "djinni" or not is_djinni_job_url(url)
 
 
 def remediation_options(event: dict[str, Any]) -> list[dict[str, str]]:
@@ -299,6 +315,8 @@ def collect_unresolved_blockers(events: list[dict[str, Any]]) -> list[dict[str, 
         if not url_key or url_key in resolved_urls:
             continue
         if result not in BLOCKED_RESULTS and not result.startswith("blocked_"):
+            continue
+        if is_stale_wrong_submitter_route(event):
             continue
         record = build_blocker_record(event)
         key = str(record["key"])
