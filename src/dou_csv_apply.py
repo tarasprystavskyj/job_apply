@@ -312,7 +312,10 @@ def inspect_state(tab: CdpTab) -> dict[str, Any]:
     already_applied: location.href.includes("?sent") ||
       location.href.includes("sent#replied-id") ||
       forms.some(e => String(e.className || "").toLowerCase().includes("sent")) ||
-      /\u0432\u0438 \u0432\u0456\u0434\u0433\u0443\u043a\u043d\u0443\u043b\u0438\u0441|\u0432\u0456\u0434\u0433\u0443\u043a \u043d\u0430\u0434\u0456\u0441\u043b|application sent|already applied/i.test(body),
+      controls.some(e =>
+        /\u0432\u0438 \u0432\u0456\u0434\u0433\u0443\u043a\u043d\u0443\u043b\u0438\u0441|\u0432\u0456\u0434\u0433\u0443\u043a \u043d\u0430\u0434\u0456\u0441\u043b|application sent|already applied/i.test(e.text) ||
+        /\bsent\b|(^|\s)replied(\s|$)/i.test(e.className)
+      ),
     has_application_surface: forms.length > 0,
     application_surfaces: forms,
     applyish_controls: controls,
@@ -343,6 +346,11 @@ def open_application_surface(tab: CdpTab) -> dict[str, Any]:
     return /\u0432\u0456\u0434\u0433\u0443\u043a\u043d|\u0432\u0456\u0434\u043f\u0440\u0430\u0432|\u043d\u0430\u0434\u0456\u0441\u043b\u0430\u0442\u0438 \u0440\u0435\u0437\u044e\u043c\u0435|send cv|apply/i.test(`${text} ${e.id || ""} ${e.className || ""}`);
   });
   if (!button) return {ok: false, reason: "no visible non-submit application opener"};
+  const href = button.href || "";
+  const className = String(button.className || "");
+  if (/replied-external/i.test(className) || /\/goto\/vacancy/i.test(href)) {
+    return {ok: false, reason: "external application link", external_url: href, className, text: (button.innerText || button.value || "").trim()};
+  }
   button.scrollIntoView({block: "center"});
   button.click();
   return {ok: true, opened: true, text: (button.innerText || button.value || "").trim()};
@@ -669,7 +677,8 @@ def process_row(row: DouApplicationRow, endpoint: str, mode: str, log_path: Path
         time.sleep(1.0)
         if not opened.get("ok"):
             state = inspect_state(tab)
-            append_log(log_path, {**base_event, "result": "blocked_no_application_surface", "before": before, "opened": opened, "state": state})
+            result = "blocked_external_application_link" if opened.get("reason") == "external application link" else "blocked_no_application_surface"
+            append_log(log_path, {**base_event, "result": result, "before": before, "opened": opened, "state": state})
             print(f"row {row.row_number}: blocked: {opened.get('reason')}")
             return 3
 

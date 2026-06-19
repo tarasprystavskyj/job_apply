@@ -306,6 +306,43 @@ class DouCsvApplyTest(unittest.TestCase):
             event = json.loads(log_path.read_text(encoding="utf-8").strip())
             self.assertEqual(event["result"], "already_applied")
 
+    def test_execute_classifies_external_application_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "dou.jsonl"
+            fake_tab = Mock()
+            opened = {
+                "ok": False,
+                "reason": "external application link",
+                "external_url": "https://dou.ua/goto/vacancy/362245/",
+            }
+            with (
+                patch.object(dou_csv_apply, "open_tab", return_value=fake_tab),
+                patch.object(dou_csv_apply, "wait_for_page"),
+                patch.object(dou_csv_apply, "inspect_state", side_effect=[{"body_start": ""}, {"body_start": ""}]),
+                patch.object(dou_csv_apply, "open_application_surface", return_value=opened),
+                patch.object(dou_csv_apply, "fill_form") as fill_form,
+                patch.object(dou_csv_apply, "submit_form") as submit_form,
+            ):
+                rc = dou_csv_apply.process_row(row(), "http://127.0.0.1:9222", "execute", log_path, 0)
+
+            self.assertEqual(rc, 3)
+            fill_form.assert_not_called()
+            submit_form.assert_not_called()
+            event = json.loads(log_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(event["result"], "blocked_external_application_link")
+            self.assertEqual(event["opened"]["external_url"], "https://dou.ua/goto/vacancy/362245/")
+
+    def test_inspect_state_does_not_use_global_body_text_for_already_applied(self) -> None:
+        fake_tab = Mock()
+        fake_tab.eval.return_value = {}
+
+        dou_csv_apply.inspect_state(fake_tab)
+
+        expression = fake_tab.eval.call_args.args[0]
+        self.assertIn("controls.some(e =>", expression)
+        self.assertIn(r"\bsent\b|(^|\s)replied(\s|$)", expression)
+        self.assertNotIn("already applied/i.test(body)", expression)
+
 
 if __name__ == "__main__":
     unittest.main()

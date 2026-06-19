@@ -201,6 +201,74 @@ def latest_submission_blocker_summary(limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+def load_jsonl_events(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def wait_for_job_logs(jobs: list[dict[str, Any]], timeout_sec: float = 180.0, poll_sec: float = 2.0) -> None:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        pending = False
+        for job in jobs:
+            log_path = Path(str(job.get("jsonl_log") or ""))
+            expected_rows = int(job.get("rows") or 0)
+            if expected_rows <= 0 or not log_path.exists():
+                pending = True
+                break
+            if len(load_jsonl_events(log_path)) < expected_rows:
+                pending = True
+                break
+        if not pending:
+            return
+        time.sleep(poll_sec)
+
+
+def blocker_summary_from_events(events: list[dict[str, Any]], *, empty_text: str = "Current batch blockers: none.") -> str:
+    blockers = [
+        event
+        for event in events
+        if display_result(event).startswith("blocked") or str(event.get("blocked_reason", "")).strip()
+    ]
+    if not blockers:
+        return empty_text
+    lines = ["Current batch blockers:"]
+    for event in blockers[:8]:
+        site = str(event.get("site") or "")
+        site_label = SITE_LABELS.get(site, site or "unknown")
+        company = event.get("company") or "unknown company"
+        result = event.get("result") or "unknown result"
+        reason = event.get("blocked_reason") or "; ".join(event.get("errors") or []) or str(event.get("filled", {}).get("reason") or event.get("opened", {}).get("reason") or "no detailed reason")
+        url = event.get("source_url") or event.get("url") or event.get("thread_url") or ""
+        lines.append(f"- [{site_label}] {company}: {result}; {reason}")
+        if url:
+            lines.append(str(url))
+    return "\n".join(lines)
+
+
+def current_jobs_summary(jobs: list[dict[str, Any]]) -> str:
+    events: list[dict[str, Any]] = []
+    for job in jobs:
+        events.extend(load_jsonl_events(Path(str(job.get("jsonl_log") or ""))))
+    if not events:
+        return "Current batch result: no log rows written yet."
+    counts: dict[str, int] = {}
+    for event in events:
+        result = display_result(event) or "unknown"
+        counts[result] = counts.get(result, 0) + 1
+    count_text = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+    return f"Current batch results: {count_text}\n\n{blocker_summary_from_events(events)}"
+
+
 def djinni_profile_update_proposal_lines() -> list[str]:
     return [
         "I can prepare a Djinni profile update draft. No profile fields will be changed or saved without separate explicit approval.",
@@ -291,13 +359,14 @@ class TelegramBot:
             jobs = launch_approved_runs(Path(batch), "submit", include_review_runs=False)
             message = f"Approved all-site application batch started:\n{batch}"
             if jobs:
+                wait_for_job_logs([dict(job) for job in jobs])
                 message += "\n\nJobs:\n" + "\n".join(
                     f"- {job.get('site')} rows={job.get('rows')} pid={job.get('pid')} log={job.get('stdout_log')}"
                     for job in jobs
                 )
             else:
                 message += "\n\nNo approved supported rows matched site validators."
-            message += "\n\n" + latest_submission_blocker_summary()
+            message += "\n\n" + current_jobs_summary([dict(job) for job in jobs])
             self.send(chat_id, message[:3900])
         except Exception as exc:
             self.send(chat_id, f"Approved batch runner failed: {type(exc).__name__}: {exc}")

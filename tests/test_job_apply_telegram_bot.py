@@ -176,6 +176,56 @@ class TelegramBotCommandTests(unittest.TestCase):
         self.assertIn("[Work.ua] Netpeak", summary)
         self.assertIn("[DOU] Example DOU", summary)
 
+    def test_current_jobs_summary_uses_only_current_job_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            current_log = Path(td) / "dou_submit.jsonl"
+            current_log.write_text(
+                json.dumps(
+                    {
+                        "site": "dou",
+                        "company": "Current",
+                        "source_url": "https://jobs.dou.ua/companies/current/vacancies/1/",
+                        "result": "already_applied",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            jobs = [{"site": "dou", "rows": 1, "jsonl_log": str(current_log)}]
+
+            with patch.object(
+                job_apply_telegram_bot,
+                "latest_submission_blocker_summary",
+                return_value="Submission blockers:\n- [DOU] Old: blocked_fill_failed",
+            ):
+                summary = job_apply_telegram_bot.current_jobs_summary(jobs)
+
+            self.assertIn("already_applied=1", summary)
+            self.assertIn("Current batch blockers: none.", summary)
+            self.assertNotIn("Old", summary)
+
+    def test_current_jobs_summary_reports_current_blocker_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            current_log = Path(td) / "dou_submit.jsonl"
+            current_log.write_text(
+                json.dumps(
+                    {
+                        "site": "dou",
+                        "company": "Current",
+                        "source_url": "https://jobs.dou.ua/companies/current/vacancies/1/",
+                        "result": "blocked_fill_failed",
+                        "filled": {"reason": "textarea not found"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            jobs = [{"site": "dou", "rows": 1, "jsonl_log": str(current_log)}]
+
+            summary = job_apply_telegram_bot.current_jobs_summary(jobs)
+
+            self.assertIn("[DOU] Current: blocked_fill_failed; textarea not found", summary)
+
     def test_sync_web_state_latest_batch_updates_parallel_web_interface(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "web_state.json"
