@@ -240,6 +240,112 @@ class VacancyPipelineTests(unittest.TestCase):
             "submitted_success",
         )
 
+    def test_submission_history_matches_urls_with_query_fragment_and_trailing_slash(self) -> None:
+        events = [
+            {
+                "source_url": "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/?applied=ok#done",
+                "result": "submitted_success",
+                "attempted_at": "2026-06-12T10:00:00+0300",
+            }
+        ]
+
+        history = vacancy_pipeline.latest_submission_by_url(events)
+
+        self.assertEqual(
+            vacancy_pipeline.terminal_submission_state(
+                {"source_url": "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/"},
+                history,
+            ),
+            "submitted_success",
+        )
+
+    def test_candidate_batch_excludes_djinni_eligibility_mismatch_warning(self) -> None:
+        observation = {
+            "source_site": "djinni",
+            "source_url": "https://djinni.co/jobs/830630-senior-python-backend-engineer-fastapi-cloud-/",
+            "title": "Senior Python Backend Engineer",
+            "company": "Visarsoft",
+            "fit_tags": ["python", "ai"],
+        }
+        mismatch = {
+            "source_url": "https://djinni.co/jobs/830630-senior-python-backend-engineer-fastapi-cloud-/",
+            "result": "blocked_no_apply_form",
+            "blocked_reason": "djinni eligibility mismatch: salary/location filters",
+            "eligibility_mismatch": True,
+            "attempted_at": "2026-06-19T15:34:37+0300",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "batch.csv"
+            with (
+                patch.object(vacancy_pipeline, "latest_observations", return_value=[observation]),
+                patch.object(vacancy_pipeline, "latest_inbox_offers", return_value=[]),
+                patch.object(vacancy_pipeline, "latest_submission_by_url", return_value=vacancy_pipeline.latest_submission_by_url([mismatch])),
+            ):
+                vacancy_pipeline.build_candidate_batch(limit=10, output=output)
+
+            text = output.read_text(encoding="utf-8")
+
+        self.assertNotIn("https://djinni.co/jobs/830630-senior-python-backend-engineer-fastapi-cloud-/", text)
+
+    def test_candidate_batch_excludes_active_blocked_retry_rows(self) -> None:
+        observation = {
+            "source_site": "dou",
+            "source_url": "https://jobs.dou.ua/companies/spsoft/vacancies/361793/",
+            "title": "Python Engineer",
+            "company": "SPsoft",
+            "fit_tags": ["python"],
+        }
+        blocked = {
+            "source_url": "https://jobs.dou.ua/companies/spsoft/vacancies/361793/",
+            "result": "blocked_no_application_surface",
+            "attempted_at": "2026-06-12T20:12:15+0300",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "batch.csv"
+            with (
+                patch.object(vacancy_pipeline, "latest_observations", return_value=[observation]),
+                patch.object(vacancy_pipeline, "latest_inbox_offers", return_value=[]),
+                patch.object(vacancy_pipeline, "latest_submission_by_url", return_value=vacancy_pipeline.latest_submission_by_url([blocked])),
+            ):
+                vacancy_pipeline.build_candidate_batch(limit=10, output=output)
+
+            text = output.read_text(encoding="utf-8")
+
+        self.assertNotIn("https://jobs.dou.ua/companies/spsoft/vacancies/361793/", text)
+
+    def test_candidate_batch_excludes_manual_skipped_urls(self) -> None:
+        observation = {
+            "source_site": "dou",
+            "source_url": "https://jobs.dou.ua/companies/epam-systems/vacancies/358381/",
+            "title": "Python Team Lead",
+            "company": "EPAM",
+            "fit_tags": ["python"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            skip_path = Path(tmp) / "manual_skips.jsonl"
+            skip_path.write_text(
+                json.dumps(
+                    {
+                        "status": "manual_skip",
+                        "source_url": "https://jobs.dou.ua/companies/epam-systems/vacancies/358381/",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "batch.csv"
+            with (
+                patch.object(vacancy_pipeline, "latest_observations", return_value=[observation]),
+                patch.object(vacancy_pipeline, "latest_inbox_offers", return_value=[]),
+                patch.object(vacancy_pipeline, "latest_submission_by_url", return_value={}),
+                patch.object(vacancy_pipeline, "MANUAL_SKIPS_PATH", skip_path),
+            ):
+                vacancy_pipeline.build_candidate_batch(limit=10, output=output)
+
+            text = output.read_text(encoding="utf-8")
+
+        self.assertNotIn("https://jobs.dou.ua/companies/epam-systems/vacancies/358381/", text)
+
 
 if __name__ == "__main__":
     unittest.main()

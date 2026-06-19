@@ -129,6 +129,18 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(job_apply_web.display_result(events[0]), "submitted_success_inferred")
 
+    def test_display_result_infers_dou_sent_url_success(self) -> None:
+        event = {
+            "result": "submit_clicked_unconfirmed",
+            "submitted": {"submitted": True},
+            "after": {
+                "url": "https://jobs.dou.ua/companies/codetiburon/vacancies/360415/?sent#replied-id",
+                "application_surfaces": [{"className": "replied sent "}],
+            },
+        }
+
+        self.assertEqual(job_apply_web.display_result(event), "submitted_success_inferred")
+
     def test_render_page_supports_ukrainian_localization(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "state.json"
@@ -150,6 +162,20 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertIn("Scan all sources + build batch", html)
             self.assertIn("/function-map", html)
             self.assertIn("Function map", html)
+
+    def test_main_page_shows_single_user_send_button_not_debug_run_buttons(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state.json"
+            state.write_text(json.dumps({"latest_batch": "", "status": "idle"}), encoding="utf-8")
+            with patch.object(job_apply_web, "STATE_PATH", state):
+                html = job_apply_web.render_page("en")
+
+            self.assertIn("Submit selected applications", html)
+            self.assertIn('formaction="/send"', html)
+            self.assertNotIn("Run validation dry-run", html)
+            self.assertNotIn("Prepare / pre-submit", html)
+            self.assertNotIn('formaction="/send-dry-run"', html)
+            self.assertNotIn('formaction="/prepare"', html)
 
     def test_load_state_uses_newer_all_sources_summary_batch(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -373,12 +399,53 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertEqual([job["site"] for job in jobs], ["djinni", "djinni_inbox"])
             self.assertEqual(len(popen_commands), 1)
             self.assertIn("djinni_csv_apply.py", popen_commands[0][1])
+
+    def test_approved_rows_skip_urls_with_existing_submission_history(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            rows = [
+                row("djinni", "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/"),
+                row("dou", "https://jobs.dou.ua/companies/example/vacancies/12345/"),
+            ]
+            for item in rows:
+                item["approved_to_submit"] = "true"
+                item["final_submit_allowed"] = "true"
+            write_batch(batch, rows)
+            history = {
+                "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python": {
+                    "source_url": "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/",
+                    "result": "submitted_success",
+                }
+            }
+
+            class FakeProcess:
+                pid = 12345
+
+            popen_commands: list[list[str]] = []
+
+            def fake_popen(cmd: list[str], **kwargs: object) -> FakeProcess:
+                popen_commands.append(cmd)
+                return FakeProcess()
+
+            with (
+                patch.object(job_apply_web, "WEB_RUNS_DIR", Path(td)),
+                patch.object(job_apply_web, "latest_submission_by_url", return_value=history),
+                patch.object(job_apply_web.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                grouped = approved_rows_by_site(batch, skip_submission_history=True)
+                jobs = job_apply_web.launch_approved_runs(batch, "submit")
+
+            self.assertEqual(grouped["djinni"], [])
+            self.assertEqual(len(grouped["dou"]), 1)
+            self.assertEqual([job["site"] for job in jobs], ["dou"])
+            self.assertEqual(len(popen_commands), 1)
+            self.assertIn("dou_csv_apply.py", popen_commands[0][1])
             csv_path = Path(str(jobs[0]["csv"]))
             with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
                 submitted_rows = list(csv.DictReader(f))
             self.assertEqual(len(submitted_rows), 1)
-            self.assertEqual(submitted_rows[0]["site"], "djinni")
-            self.assertTrue(submitted_rows[0]["url"].startswith("https://djinni.co/jobs/"))
+            self.assertEqual(submitted_rows[0]["site"], "dou")
+            self.assertTrue(submitted_rows[0]["url"].startswith("https://jobs.dou.ua/companies/example/vacancies/12345/"))
 
     def test_approved_rows_are_normalized_for_site_specific_submitters(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -395,13 +462,24 @@ class JobApplyWebTests(unittest.TestCase):
             update_batch_approvals(batch, approve_all=True)
             grouped = approved_rows_by_site(batch)
 
-            self.assertEqual(grouped["workua"][0]["linkedin_policy"], "fill_field")
+            self.assertEqual(grouped["workua"][0]["linkedin_policy"], "no_linkedin")
             self.assertEqual(grouped["dou"][0]["linkedin_policy"], "fill_url")
             self.assertEqual(grouped["robotaua"][0]["linkedin_policy"], "include_linkedin")
+            self.assertEqual(grouped["workua"][0]["resume_policy"], "use_workua_profile")
+            self.assertEqual(grouped["workua"][0]["upload_allowed"], "false")
+            self.assertEqual(grouped["workua"][0]["message_policy"], "profile_resume_only")
+            self.assertEqual(grouped["workua"][0]["profile_resume_only_allowed"], "true")
+            self.assertEqual(grouped["workua"][0]["approved_resume_name"], "Work.ua profile resume")
+            self.assertEqual(grouped["robotaua"][0]["resume_policy"], "upload_exact_resume")
+            self.assertEqual(grouped["robotaua"][0]["upload_allowed"], "true")
+            self.assertEqual(grouped["robotaua"][0]["approved_resume_name"], job_apply_web.DEFAULT_ROBOTAUA_RESUME_PATH.name)
+            self.assertEqual(grouped["robotaua"][0]["approved_resume_path"], str(job_apply_web.DEFAULT_ROBOTAUA_RESUME_PATH))
+            self.assertEqual(grouped["dou"][0]["resume_policy"], "upload_file")
+            self.assertEqual(grouped["dou"][0]["upload_allowed"], "true")
+            self.assertEqual(grouped["dou"][0]["approved_resume_name"], job_apply_web.DEFAULT_DOU_RESUME_PATH.name)
+            self.assertEqual(grouped["dou"][0]["approved_resume_path"], str(job_apply_web.DEFAULT_DOU_RESUME_PATH))
             for rows in grouped.values():
                 for approved in rows:
-                    self.assertEqual(approved["resume_policy"], "no_resume")
-                    self.assertEqual(approved["upload_allowed"], "false")
                     self.assertEqual(approved["approved_to_submit"], "true")
                     self.assertEqual(approved["final_submit_allowed"], "true")
 
@@ -428,6 +506,99 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertEqual(approved["upload_allowed"], "true")
             self.assertEqual(approved["approved_resume_name"], "Senior Python CV.pdf")
             self.assertEqual(approved["approved_resume_path"], "data/approved_artifacts/Senior Python CV.pdf")
+
+    def test_dou_exact_upload_gate_is_preserved_when_already_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            values = row("dou", "https://jobs.dou.ua/companies/example/vacancies/12345/")
+            values["resume_policy"] = "upload_file"
+            values["upload_allowed"] = "true"
+            values["approved_resume_name"] = "Senior Python CV.pdf"
+            values["approved_resume_path"] = "data/approved_artifacts/Senior Python CV.pdf"
+            fields = list(values)
+            with batch.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(values)
+
+            changed, skipped = update_batch_approvals(batch, approve_all=True)
+            grouped = approved_rows_by_site(batch)
+
+            self.assertEqual((changed, skipped), (1, 0))
+            approved = grouped["dou"][0]
+            self.assertEqual(approved["resume_policy"], "upload_file")
+            self.assertEqual(approved["upload_allowed"], "true")
+            self.assertEqual(approved["approved_resume_name"], "Senior Python CV.pdf")
+            self.assertEqual(approved["approved_resume_path"], "data/approved_artifacts/Senior Python CV.pdf")
+
+    def test_dou_rows_get_default_resume_upload_gate_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            values = row("dou", "https://jobs.dou.ua/companies/example/vacancies/12345/")
+            resume = Path(td) / "Taras_Prystavskyj_AI_Automation_Resume_2026-06-11.pdf"
+            resume.write_bytes(b"%PDF-1.4 fixture")
+            fields = list(values)
+            with batch.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(values)
+
+            with patch.object(job_apply_web, "DEFAULT_DOU_RESUME_PATH", resume):
+                changed, skipped = update_batch_approvals(batch, approve_all=True)
+                grouped = approved_rows_by_site(batch)
+
+            self.assertEqual((changed, skipped), (1, 0))
+            approved = grouped["dou"][0]
+            self.assertEqual(approved["resume_policy"], "upload_file")
+            self.assertEqual(approved["upload_allowed"], "true")
+            self.assertEqual(approved["approved_resume_name"], resume.name)
+            self.assertEqual(approved["approved_resume_path"], str(resume))
+
+    def test_robotaua_rows_get_default_resume_upload_gate_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            values = row("robotaua", "https://robota.ua/company3685368/vacancy11052703")
+            resume = Path(td) / "Taras_Prystavskyj_AI_Automation_Resume_2026-06-11.pdf"
+            resume.write_bytes(b"%PDF-1.4 fixture")
+            fields = list(values)
+            with batch.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(values)
+
+            with patch.object(job_apply_web, "DEFAULT_ROBOTAUA_RESUME_PATH", resume):
+                changed, skipped = update_batch_approvals(batch, approve_all=True)
+                grouped = approved_rows_by_site(batch)
+
+            self.assertEqual((changed, skipped), (1, 0))
+            approved = grouped["robotaua"][0]
+            self.assertEqual(approved["resume_policy"], "upload_exact_resume")
+            self.assertEqual(approved["upload_allowed"], "true")
+            self.assertEqual(approved["approved_resume_name"], resume.name)
+            self.assertEqual(approved["approved_resume_path"], str(resume))
+
+    def test_workua_rows_get_profile_resume_only_gate_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            values = row("workua", "https://www.work.ua/jobs/7768869/")
+            fields = list(values)
+            with batch.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(values)
+
+            changed, skipped = update_batch_approvals(batch, approve_all=True)
+            grouped = approved_rows_by_site(batch)
+
+            self.assertEqual((changed, skipped), (1, 0))
+            approved = grouped["workua"][0]
+            self.assertEqual(approved["resume_policy"], "use_workua_profile")
+            self.assertEqual(approved["message_policy"], "profile_resume_only")
+            self.assertEqual(approved["profile_resume_only_allowed"], "true")
+            self.assertEqual(approved["linkedin"], "")
+            self.assertEqual(approved["linkedin_policy"], "no_linkedin")
+            self.assertEqual(approved["upload_allowed"], "false")
+            self.assertEqual(approved["approved_resume_name"], "Work.ua profile resume")
 
     def test_dou_remediation_reads_raw_listing_rows_before_batch_filtering(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from job_apply_config import ROOT, settings
 from job_platforms.dou import is_exact_dou_vacancy_url
@@ -36,6 +37,7 @@ ROLE_TITLE_RE = re.compile(
 DJINNI_THREAD_ID_RE = re.compile(r"^https://djinni\.co/my/inbox/(\d+)/?(?:#.*)?$")
 INBOX_OFFERS_PATH = ROOT / "data" / "job_waves" / "djinni_inbox_offers.jsonl"
 SUBMISSION_ATTEMPTS_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
+MANUAL_SKIPS_PATH = ROOT / "data" / "job_waves" / "manual_skips.jsonl"
 TERMINAL_SUBMISSION_RESULTS = {"submitted_success", "submitted_success_inferred", "already_applied"}
 OBSERVATION_PATHS = [
     ROOT / "data" / "job_waves" / "dou_observations.jsonl",
@@ -116,6 +118,27 @@ def latest_inbox_offers() -> list[dict[str, Any]]:
     return rows
 
 
+def manual_skip_urls(path: Path | None = None) -> set[str]:
+    path = path or MANUAL_SKIPS_PATH
+    if not path.exists():
+        return set()
+    skipped: set[str] = set()
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if str(row.get("status") or "skipped") not in {"skipped", "manual_skip"}:
+            continue
+        url = str(row.get("source_url") or row.get("url") or "")
+        normalized = normalize_submission_url(url)
+        if normalized:
+            skipped.add(normalized)
+    return skipped
+
+
 def is_active_public_vacancy(row: dict[str, Any]) -> bool:
     text = " ".join(
         [
@@ -169,7 +192,13 @@ def previously_replied_thread_urls() -> set[str]:
 
 
 def normalize_submission_url(url: str) -> str:
-    return url.strip().lower().rstrip("/")
+    raw = url.strip()
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    if not parts.scheme or not parts.netloc:
+        return raw.lower().rstrip("/")
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
 
 
 def latest_submission_by_url(events: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
@@ -221,8 +250,12 @@ def terminal_submission_state(row: dict[str, Any], history: dict[str, dict[str, 
     blocked_reason = str(prior.get("blocked_reason", ""))
     if result in TERMINAL_SUBMISSION_RESULTS:
         return result
+    if prior.get("eligibility_mismatch") or blocked_reason.startswith("djinni eligibility mismatch"):
+        return "not_matching_company_filters"
     if blocked_reason == "inactive vacancy":
         return "inactive"
+    if result.startswith("blocked_"):
+        return "blocked_retry_queue"
     return ""
 
 
@@ -386,16 +419,28 @@ def draft_cover_letter(vacancy: dict[str, Any], resume: dict[str, Any] | None) -
 def build_candidate_batch(limit: int = 10, output: Path | None = None) -> Path:
     out = output or ROOT / "data" / "job_waves" / f"candidate_batch_{time.strftime('%Y%m%d_%H%M%S')}.csv"
     history = latest_submission_by_url()
+    skipped_urls = manual_skip_urls()
     public_vacancies = sorted(
         [
             row
             for row in latest_observations()
-            if is_active_public_vacancy(row) and terminal_submission_state(row, history) == ""
+            if is_active_public_vacancy(row)
+            and normalize_submission_url(str(row.get("source_url") or "")) not in skipped_urls
+            and terminal_submission_state(row, history) == ""
         ],
         key=batch_score,
         reverse=True,
     )
-    inbox_offers = sorted([row for row in latest_inbox_offers() if is_actionable_inbox_offer(row)], key=batch_score, reverse=True)
+    inbox_offers = sorted(
+        [
+            row
+            for row in latest_inbox_offers()
+            if normalize_submission_url(str(row.get("source_url") or row.get("thread_url") or "")) not in skipped_urls
+            and is_actionable_inbox_offer(row)
+        ],
+        key=batch_score,
+        reverse=True,
+    )
     inbox_quota = min(len(inbox_offers), limit, max(1, min(3, limit)))
     public_quota = max(0, limit - inbox_quota)
     vacancies = sorted(public_vacancies[:public_quota] + inbox_offers[:inbox_quota], key=batch_score, reverse=True)

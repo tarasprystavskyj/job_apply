@@ -242,8 +242,15 @@ def inspect_state_precise(tab: CdpTab) -> dict[str, Any]:
   const inactive = body.includes("Неактивна") ||
     body.includes("Ця вакансія зараз неактивна") ||
     body.includes("inactive vacancy");
-  const profileUpdateRequired = body.includes("оновіть профіль") ||
-    body.includes("update your profile");
+  const eligibilityMismatch = body.includes("Ваш профіль не відповідає деяким вимогам") ||
+    body.includes("Ваші зарплатні очікування вищі") ||
+    body.includes("Країни, де розглядаємо кандидатів") ||
+    body.includes("your profile does not match") ||
+    body.includes("salary expectations are higher");
+  const profileUpdateRequired = !eligibilityMismatch && (
+    body.includes("оновіть профіль") ||
+    body.includes("update your profile")
+  );
   return {
     url: location.href,
     title: document.title,
@@ -251,6 +258,7 @@ def inspect_state_precise(tab: CdpTab) -> dict[str, Any]:
     already_applied: alreadyApplied,
     success,
     inactive,
+    eligibility_mismatch: eligibilityMismatch,
     profile_update_required: profileUpdateRequired,
     has_apply_form: !!form,
     has_apply_button: !!document.querySelector(".js-inbox-toggle-reply-form"),
@@ -268,6 +276,8 @@ def classify_no_apply_state(state: dict[str, Any], opened: dict[str, Any] | None
         return "already applied"
     if state.get("inactive"):
         return "inactive vacancy"
+    if state.get("eligibility_mismatch"):
+        return "djinni eligibility mismatch: salary/location filters"
     if state.get("profile_update_required"):
         return "profile update required before Djinni allows applying"
     controls = state.get("applyish_controls") or []
@@ -329,6 +339,17 @@ def profile_update_blocker_fields(state: dict[str, Any], action: dict[str, Any] 
         "profile_update_required": True,
         "profile_update_url": action.get("profile_update_url") or state.get("profile_update_url") or "https://djinni.co/my/profile/",
         "profile_update_action_text": action.get("profile_update_action_text") or state.get("profile_update_action_text") or "",
+    }
+
+
+def eligibility_mismatch_fields(state: dict[str, Any]) -> dict[str, Any]:
+    if not state.get("eligibility_mismatch"):
+        return {}
+    body = str(state.get("body_start") or "")
+    return {
+        "eligibility_mismatch": True,
+        "eligibility_mismatch_kind": "salary_location",
+        "eligibility_mismatch_excerpt": body[:500],
     }
 
 
@@ -595,6 +616,7 @@ def process_row(row: ApplicationRow, endpoint: str, execute: bool, log_path: Pat
                 log_path,
                 {
                     **base_event,
+                    **eligibility_mismatch_fields(after_open),
                     **profile_update_blocker_fields(after_open, profile_action),
                     "result": "blocked_no_apply_form",
                     "blocked_reason": reason,

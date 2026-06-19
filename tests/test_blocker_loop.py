@@ -16,6 +16,19 @@ from job_platforms import progress  # noqa: E402
 
 
 class BlockerLoopTests(unittest.TestCase):
+    def test_dou_sent_url_unconfirmed_result_is_resolved_inferred_success(self) -> None:
+        event = {
+            "site": "dou",
+            "source_url": "https://jobs.dou.ua/companies/codetiburon/vacancies/360415/",
+            "result": "submit_clicked_unconfirmed",
+            "after": {
+                "url": "https://jobs.dou.ua/companies/codetiburon/vacancies/360415/?sent#replied-id",
+                "application_surfaces": [{"className": "replied sent "}],
+            },
+        }
+
+        self.assertEqual(blocker_loop.normalize_result(event), "submitted_success_inferred")
+
     def test_profile_update_blocker_gets_manual_and_auto_options(self) -> None:
         event = {
             "site": "djinni",
@@ -35,6 +48,26 @@ class BlockerLoopTests(unittest.TestCase):
         labels = [option["label"] for option in record["resolution_options"]]
         self.assertIn("Manual: open Djinni profile update page", labels)
         self.assertIn("Auto: run bounded Djinni profile helper", labels)
+
+    def test_djinni_eligibility_mismatch_is_warning_not_profile_update_error(self) -> None:
+        event = {
+            "site": "djinni",
+            "source_url": "https://djinni.co/jobs/830630-senior-python-backend-engineer-fastapi-cloud-/",
+            "company": "Visarsoft",
+            "title": "Senior Python Backend Engineer",
+            "result": "blocked_no_apply_form",
+            "blocked_reason": "djinni eligibility mismatch: salary/location filters",
+            "eligibility_mismatch": True,
+            "attempted_at": "2026-06-19T15:34:37+0300",
+        }
+
+        record = blocker_loop.build_blocker_record(event)
+
+        self.assertEqual(record["category"], "djinni_eligibility_mismatch")
+        labels = [option["label"] for option in record["resolution_options"]]
+        self.assertIn("Manual: skip this mismatched Djinni vacancy", labels)
+        self.assertIn("Manual: lower salary or adjust locations, then retry", labels)
+        self.assertNotIn("Auto: run bounded Djinni profile helper", labels)
 
     def test_progress_graph_includes_unresolved_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,6 +137,27 @@ class BlockerLoopTests(unittest.TestCase):
 
         self.assertEqual(record["category"], "fill_or_selector_failed")
 
+    def test_prepare_success_clears_older_form_blocker_without_marking_submit_success(self) -> None:
+        events = [
+            {
+                "site": "workua",
+                "source_url": "https://www.work.ua/jobs/7768869/",
+                "result": "blocked_fill_failed",
+                "attempted_at": "2026-06-18T20:58:02+0300",
+            },
+            {
+                "site": "workua",
+                "source_url": "https://www.work.ua/jobs/7768869/",
+                "result": "prepared_presubmit_ok",
+                "attempted_at": "2026-06-19T15:27:30+0300",
+            },
+        ]
+
+        blockers = blocker_loop.collect_unresolved_blockers(events)
+
+        self.assertEqual(blockers, [])
+        self.assertNotIn("prepared_presubmit_ok", blocker_loop.RESOLVED_RESULTS)
+
     def test_no_application_surface_blocker_is_site_changed_category(self) -> None:
         record = blocker_loop.build_blocker_record(
             {
@@ -138,6 +192,30 @@ class BlockerLoopTests(unittest.TestCase):
         self.assertEqual(len(blockers), 1)
         self.assertEqual(blockers[0]["category"], "site_changed_or_no_apply_surface")
         self.assertEqual(blockers[0]["result"], "blocked_no_application_surface")
+
+    def test_newer_eligibility_mismatch_suppresses_stale_profile_update_for_same_url(self) -> None:
+        blockers = blocker_loop.collect_unresolved_blockers(
+            [
+                {
+                    "site": "djinni",
+                    "source_url": "https://djinni.co/jobs/830630-senior-python-backend-engineer-fastapi-cloud-/",
+                    "result": "blocked_no_apply_form",
+                    "blocked_reason": "profile update required before Djinni allows applying",
+                    "attempted_at": "2026-06-19T15:34:42+0300",
+                },
+                {
+                    "site": "djinni",
+                    "source_url": "https://djinni.co/jobs/830630-senior-python-backend-engineer-fastapi-cloud-/",
+                    "result": "blocked_no_apply_form",
+                    "blocked_reason": "djinni eligibility mismatch: salary/location filters",
+                    "eligibility_mismatch": True,
+                    "attempted_at": "2026-06-19T15:55:00+0300",
+                },
+            ]
+        )
+
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0]["category"], "djinni_eligibility_mismatch")
 
     def test_newer_specific_blocker_suppresses_stale_unknown_when_old_site_missing(self) -> None:
         blockers = blocker_loop.collect_unresolved_blockers(

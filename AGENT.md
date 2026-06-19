@@ -27,6 +27,10 @@ Use this guide when installing the project on another local computer.
   patterns and manual/auto-clean options instead of sending.
 - Keep generated runtime data in ignored folders: `data/job_waves/`,
   `data/private/`, `tmp/`.
+- For `graph-ui/` work, every new owner-requested feature must be added to the
+  current project graph as a node and connected by an edge to the relevant
+  implementation/agent branch. Mark new graph feature nodes as unread/new until
+  the owner clicks them in the graph UI.
 
 ## Installation Steps
 
@@ -137,7 +141,9 @@ For browser submission, use dry-run first:
 python src\djinni_csv_apply.py --csv examples\approved_jobs_sample.csv
 ```
 
-Do not run `--execute` until the human has approved specific rows.
+Run `--execute` only for rows the human has explicitly approved for live
+submission. Live send testing is expected after approval, but each row still
+needs exact URL, exact outbound text, and platform-specific resume/upload gates.
 
 ## Proactive Blocker Handling
 

@@ -33,6 +33,7 @@ BLOCKED_RESULTS = {
     "blocked_presave_validation",
 }
 RESOLVED_RESULTS = {"submitted_success", "submitted_success_inferred", "already_applied"}
+BLOCKER_CLEARING_RESULTS = RESOLVED_RESULTS | {"prepared_presubmit_ok"}
 DJINNI_WRONG_SUBMITTER_ROUTE_REASON = "only site=djinni is supported by this script; url must be a djinni job url"
 
 
@@ -67,7 +68,10 @@ def normalize_result(event: dict[str, Any]) -> str:
     if result == "submit_clicked_unconfirmed":
         after = event.get("after") if isinstance(event.get("after"), dict) else {}
         after_url = str(after.get("url") or "").lower()
-        if "/jobseeker/my/resumes/sent/" in after_url or "applied=ok" in after_url:
+        if "/jobseeker/my/resumes/sent/" in after_url or "applied=ok" in after_url or "?sent" in after_url or "sent#replied-id" in after_url:
+            return "submitted_success_inferred"
+        surfaces = after.get("application_surfaces") if isinstance(after.get("application_surfaces"), list) else []
+        if any("sent" in str(surface.get("className") or "").lower() for surface in surfaces if isinstance(surface, dict)):
             return "submitted_success_inferred"
     return result
 
@@ -126,6 +130,8 @@ def classify_blocker(event: dict[str, Any]) -> str:
     result = str(event.get("result") or "").lower()
     if is_stale_wrong_submitter_route(event):
         return "stale_wrong_submitter_route"
+    if "eligibility mismatch" in reason or event.get("eligibility_mismatch"):
+        return "djinni_eligibility_mismatch"
     if "profile update required" in reason:
         return "profile_update_required"
     if "inactive vacancy" in reason or result == "blocked_inactive":
@@ -172,6 +178,21 @@ def remediation_options(event: dict[str, Any]) -> list[dict[str, str]]:
                 "label": "Auto: run bounded Djinni profile helper",
                 "action": "POST /profile-on",
                 "description": "Automation may try the safe profile toggle/fill path, then ask owner before retrying submit.",
+            },
+        ]
+    if category == "djinni_eligibility_mismatch":
+        return [
+            {
+                "id": "manual_skip_mismatch",
+                "label": "Manual: skip this mismatched Djinni vacancy",
+                "action": "skip",
+                "description": "Company filters currently exclude this profile by salary/location; treat as low-priority warning, not a broken submitter.",
+            },
+            {
+                "id": "manual_adjust_profile_or_salary",
+                "label": "Manual: lower salary or adjust locations, then retry",
+                "action": profile_url,
+                "description": "Only if owner wants to fit this company filter; otherwise do not mutate profile for one vacancy.",
             },
         ]
     if category == "inactive_vacancy":
@@ -281,12 +302,16 @@ def is_more_specific_blocker(record: dict[str, Any]) -> bool:
 def drop_stale_unknown_blockers(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     newest_specific_seen: dict[str, str] = {}
     newest_specific_seen_by_url: dict[str, str] = {}
+    newest_eligibility_mismatch: dict[str, str] = {}
     for record in records:
         if not is_more_specific_blocker(record):
             continue
         key = blocker_site_url_key(record)
         url_key = blocker_url_key(record)
         last_seen = str(record.get("last_seen_at") or "")
+        if record.get("category") == "djinni_eligibility_mismatch":
+            if last_seen > newest_eligibility_mismatch.get(key, ""):
+                newest_eligibility_mismatch[key] = last_seen
         if last_seen > newest_specific_seen.get(key, ""):
             newest_specific_seen[key] = last_seen
         if url_key and last_seen > newest_specific_seen_by_url.get(url_key, ""):
@@ -294,6 +319,10 @@ def drop_stale_unknown_blockers(records: list[dict[str, Any]]) -> list[dict[str,
 
     filtered: list[dict[str, Any]] = []
     for record in records:
+        if record.get("category") == "profile_update_required":
+            newer_mismatch_seen = newest_eligibility_mismatch.get(blocker_site_url_key(record), "")
+            if newer_mismatch_seen and newer_mismatch_seen > str(record.get("last_seen_at") or ""):
+                continue
         if is_more_specific_blocker(record):
             filtered.append(record)
             continue
@@ -307,7 +336,7 @@ def drop_stale_unknown_blockers(records: list[dict[str, Any]]) -> list[dict[str,
 
 
 def collect_unresolved_blockers(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    resolved_urls = {event_url(event).lower().rstrip("/") for event in events if normalize_result(event) in RESOLVED_RESULTS}
+    resolved_urls = {event_url(event).lower().rstrip("/") for event in events if normalize_result(event) in BLOCKER_CLEARING_RESULTS}
     records: dict[str, dict[str, Any]] = {}
     for event in events:
         result = normalize_result(event)

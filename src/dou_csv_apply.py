@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 import time
@@ -36,11 +37,15 @@ import websocket
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG = ROOT / "data" / "job_waves" / "dou_submission_attempts.jsonl"
+DEFAULT_RESUME_DIR = Path(os.environ.get("JOB_APPLY_RESUME_DIR", r"C:\python_scripts\projects_search\my_resumes"))
+APPROVED_RESUME_ARTIFACT_DIRS = (ROOT / "data" / "resumes", ROOT / "data" / "job_waves", ROOT / "data" / "approved_artifacts")
+DOU_UPLOAD_MARKER_ATTR = "data-job-apply-dou-resume-upload"
 
 TRUTHY = {"1", "true", "yes", "y", "allowed", "approve", "approved"}
 DOU_HOSTS = {"dou.ua", "jobs.dou.ua", "relocate.dou.ua"}
 RESUME_POLICIES = {"no_resume", "use_site_profile_resume", "upload_file"}
 LINKEDIN_POLICIES = {"omit", "fill_url", "use_site_profile"}
+RESUME_FILE_EXTENSIONS = {".pdf", ".doc", ".docx", ".rtf"}
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,7 @@ class DouApplicationRow:
     linkedin_policy: str
     resume_policy: str
     approved_resume_name: str
+    approved_resume_path: str
     upload_allowed: bool
     approved_to_submit: bool
     final_submit_allowed: bool
@@ -128,6 +134,7 @@ def read_rows(csv_path: Path) -> list[DouApplicationRow]:
                     linkedin_policy=(row.get("linkedin_policy") or "").strip().lower(),
                     resume_policy=(row.get("resume_policy") or "").strip().lower(),
                     approved_resume_name=(row.get("approved_resume_name") or "").strip(),
+                    approved_resume_path=(row.get("approved_resume_path") or row.get("resume_path") or "").strip(),
                     upload_allowed=truthy(row.get("upload_allowed")),
                     approved_to_submit=truthy(row.get("approved_to_submit")),
                     final_submit_allowed=truthy(row.get("final_submit_allowed")),
@@ -152,6 +159,46 @@ def is_exact_dou_vacancy_url(url: str) -> bool:
         return False
     path = urllib.parse.urlparse(url).path
     return bool(re.search(r"/vacancies/\d+/?$", path))
+
+
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def resolved_resume_roots(resume_dir: Path | None = None) -> tuple[Path, ...]:
+    base = resume_dir or DEFAULT_RESUME_DIR
+    roots = [base, *APPROVED_RESUME_ARTIFACT_DIRS]
+    return tuple(root.expanduser().resolve(strict=False) for root in roots)
+
+
+def resolve_resume_upload_path(row: DouApplicationRow, resume_dir: Path | None = None) -> Path | None:
+    if row.resume_policy != "upload_file":
+        return None
+    exact_name = row.approved_resume_name.strip()
+    if not exact_name:
+        raise ValueError("approved_resume_name is required when resume_policy=upload_file")
+    if Path(exact_name).name != exact_name:
+        raise ValueError("approved_resume_name must be an exact file name, not a path")
+    if Path(exact_name).suffix.lower() not in RESUME_FILE_EXTENSIONS:
+        raise ValueError("approved_resume_name must be a PDF/DOC/DOCX/RTF resume file")
+    if not row.approved_resume_path:
+        raise ValueError("approved_resume_path is required when resume_policy=upload_file")
+
+    roots = resolved_resume_roots(resume_dir)
+    raw = Path(row.approved_resume_path).expanduser()
+    candidate = raw if raw.is_absolute() else ROOT / raw
+    if candidate.name != exact_name:
+        raise ValueError("approved_resume_path basename must match approved_resume_name exactly")
+    resolved = candidate.resolve(strict=False)
+    if not any(is_relative_to(resolved, root) or resolved == root for root in roots):
+        raise ValueError("approved resume path must stay inside the resume directory or approved artifact directory")
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError(f"approved resume file was not found: {resolved}")
+    return resolved
 
 
 def validate_row(row: DouApplicationRow) -> list[str]:
@@ -180,11 +227,17 @@ def validate_row(row: DouApplicationRow) -> list[str]:
             errors.append("upload_allowed=true is required when resume_policy=upload_file")
         if not row.approved_resume_name:
             errors.append("approved_resume_name is required when resume_policy=upload_file")
-        errors.append("resume file upload is not implemented; no resume files will be read or uploaded")
+        if row.upload_allowed and row.approved_resume_name:
+            try:
+                resolve_resume_upload_path(row)
+            except ValueError as exc:
+                errors.append(str(exc))
     elif row.upload_allowed:
         errors.append("upload_allowed must be false unless resume_policy=upload_file")
     if row.resume_policy != "upload_file" and row.approved_resume_name:
         errors.append("approved_resume_name must be empty unless resume_policy=upload_file")
+    if row.resume_policy != "upload_file" and row.approved_resume_path:
+        errors.append("approved_resume_path must be empty unless resume_policy=upload_file")
     if not row.approved_to_submit:
         errors.append("approved_to_submit must be true")
     if not row.final_submit_allowed:
@@ -199,7 +252,18 @@ def cdp_json(endpoint: str, path: str, method: str = "GET") -> Any:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
+def normalized_url_without_fragment(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    return urllib.parse.urlunparse(parsed._replace(fragment="", query=parsed.query)).rstrip("/")
+
+
 def open_tab(endpoint: str, url: str) -> CdpTab:
+    target = normalized_url_without_fragment(url)
+    for page in cdp_json(endpoint, "/json/list"):
+        if page.get("type") != "page" or not page.get("webSocketDebuggerUrl"):
+            continue
+        if normalized_url_without_fragment(str(page.get("url") or "")) == target:
+            return CdpTab(page["webSocketDebuggerUrl"])
     encoded = urllib.parse.quote(url, safe="")
     tab_info = cdp_json(endpoint, f"/json/new?{encoded}", method="PUT")
     return CdpTab(tab_info["webSocketDebuggerUrl"])
@@ -245,6 +309,10 @@ def inspect_state(tab: CdpTab) -> dict[str, Any]:
     url: location.href,
     title: document.title,
     body_start: body.slice(0, 1200),
+    already_applied: location.href.includes("?sent") ||
+      location.href.includes("sent#replied-id") ||
+      forms.some(e => String(e.className || "").toLowerCase().includes("sent")) ||
+      /\u0432\u0438 \u0432\u0456\u0434\u0433\u0443\u043a\u043d\u0443\u043b\u0438\u0441|\u0432\u0456\u0434\u0433\u0443\u043a \u043d\u0430\u0434\u0456\u0441\u043b|application sent|already applied/i.test(body),
     has_application_surface: forms.length > 0,
     application_surfaces: forms,
     applyish_controls: controls,
@@ -283,6 +351,91 @@ def open_application_surface(tab: CdpTab) -> dict[str, Any]:
     )
 
 
+def attach_resume_file(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
+    resume_path = resolve_resume_upload_path(row)
+    if resume_path is None:
+        return {"ok": True, "skipped": True}
+    if not hasattr(tab, "call"):
+        return {"ok": False, "reason": "CDP tab.call is required for file attachment"}
+
+    prepare = tab.eval(
+        f"""
+(() => {{
+  const visible = e => {{
+    if (!e) return false;
+    const s = getComputedStyle(e), r = e.getBoundingClientRect();
+    return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0;
+  }};
+  const input = document.querySelector("#reply_file") || document.querySelector('input[type="file"][name*="reply"]') ||
+    document.querySelector('input[type="file"]');
+  if (!input) return {{ok: false, reason: "no DOU resume file input found"}};
+  input.setAttribute({json.dumps(DOU_UPLOAD_MARKER_ATTR)}, "1");
+  input.scrollIntoView({{block: "center"}});
+  return {{
+    ok: true,
+    selector: input.id === "reply_file" ? "#reply_file" : "fallback-file-input",
+    accept: input.accept || "",
+    multiple: !!input.multiple,
+    visibleInput: visible(input)
+  }};
+}})()
+"""
+    )
+    if not prepare.get("ok"):
+        return prepare
+
+    remote = tab.call(
+        "Runtime.evaluate",
+        {
+            "expression": f"document.querySelector('input[type=\"file\"][{DOU_UPLOAD_MARKER_ATTR}=\"1\"]')",
+            "returnByValue": False,
+        },
+    )
+    object_id = remote.get("result", {}).get("result", {}).get("objectId")
+    if not object_id:
+        return {"ok": False, "reason": "DOU resume file input object was not available", "prepare": prepare}
+    set_result = tab.call("DOM.setFileInputFiles", {"objectId": object_id, "files": [str(resume_path)]})
+    verify = verify_attached_resume(tab, row)
+    if not verify.get("ok"):
+        document = tab.call("DOM.getDocument", {"depth": -1, "pierce": True})
+        root_id = document.get("result", {}).get("root", {}).get("nodeId")
+        if root_id:
+            query = tab.call(
+                "DOM.querySelector",
+                {"nodeId": root_id, "selector": f'input[type="file"][{DOU_UPLOAD_MARKER_ATTR}="1"]'},
+            )
+            node_id = query.get("result", {}).get("nodeId")
+            if node_id:
+                set_result = tab.call("DOM.setFileInputFiles", {"nodeId": node_id, "files": [str(resume_path)]})
+                verify = verify_attached_resume(tab, row)
+    return {"ok": bool(verify.get("ok")), "path": str(resume_path), "prepare": prepare, "set_result": set_result, "verify": verify}
+
+
+def verify_attached_resume(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
+    return tab.eval(
+        f"""
+(() => {{
+  const input = document.querySelector('input[type="file"][{DOU_UPLOAD_MARKER_ATTR}="1"]') ||
+    document.querySelector("#reply_file");
+  if (!input) return {{ok: false, reason: "marked DOU resume file input disappeared"}};
+  const namesBeforeEvents = Array.from(input.files || []).map(file => file.name);
+  input.dispatchEvent(new Event("input", {{bubbles: true}}));
+  input.dispatchEvent(new Event("change", {{bubbles: true}}));
+  const names = Array.from(input.files || []).map(file => file.name);
+  const bodyText = document.body ? document.body.innerText : "";
+  const visibleFileName = bodyText.includes({json.dumps(row.approved_resume_name)});
+  return {{
+    ok: namesBeforeEvents.includes({json.dumps(row.approved_resume_name)}) || names.includes({json.dumps(row.approved_resume_name)}) || visibleFileName,
+    fileNamesBeforeEvents: namesBeforeEvents,
+    fileNames: names,
+    visibleFileName,
+    expectedName: {json.dumps(row.approved_resume_name)}
+  }};
+}})()
+"""
+    )
+
+
 def fill_form(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
     expression = f"""
 (() => {{
@@ -291,6 +444,7 @@ def fill_form(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
     linkedin: {json.dumps(row.linkedin)},
     linkedinPolicy: {json.dumps(row.linkedin_policy)},
     resumePolicy: {json.dumps(row.resume_policy)},
+    approvedResumeName: {json.dumps(row.approved_resume_name)},
     answers: {json.dumps(row.answers)}
   }};
   const visible = e => {{
@@ -339,6 +493,7 @@ def fill_form(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
   }}
 
   const fileInputs = Array.from(root.querySelectorAll("input[type=file]")).filter(visible);
+  const fileInputsWithFiles = fileInputs.filter(e => e.files && e.files.length > 0).length;
   const submit = Array.from(root.querySelectorAll("button,input[type=submit]")).filter(visible)
     .find(e => /\u0432\u0456\u0434\u043f\u0440\u0430\u0432|\u043d\u0430\u0434\u0456\u0441\u043b|submit|send|apply/i.test(`${{e.innerText || e.value || ""}} ${{e.name || ""}} ${{e.id || ""}} ${{e.className || ""}}`));
   return {{
@@ -348,6 +503,7 @@ def fill_form(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any]:
     messageLength: messageField.value.length,
     linkedinFilled,
     fileInputs: fileInputs.map(e => ({{name: e.name || "", id: e.id || ""}})),
+    fileInputsWithFiles,
     filledAnswers,
     submitText: submit ? (submit.innerText || submit.value || "").trim() : null,
     submitDisabled: submit ? !!submit.disabled : null
@@ -365,6 +521,7 @@ def validate_before_submit(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any
     linkedin: {json.dumps(row.linkedin)},
     linkedinPolicy: {json.dumps(row.linkedin_policy)},
     resumePolicy: {json.dumps(row.resume_policy)},
+    approvedResumeName: {json.dumps(row.approved_resume_name)},
     answers: {json.dumps(row.answers)}
   }};
   const visible = e => {{
@@ -400,12 +557,18 @@ def validate_before_submit(tab: CdpTab, row: DouApplicationRow) -> dict[str, Any
   }}
 
   const fileInputs = Array.from(root.querySelectorAll("input[type=file]")).filter(visible);
+  const fileNames = fileInputs.flatMap(e => Array.from(e.files || []).map(file => file.name));
   details.visibleFileInputs = fileInputs.length;
-  if (expected.resumePolicy !== "upload_file" && fileInputs.some(e => e.value)) {{
-    errors.push("resume file input has a value but resume upload is not approved");
+  details.fileNames = fileNames;
+  details.hasReplyFileInput = fileInputs.some(e => e.id === "reply_file" || /reply|cv|resume|file/i.test(`${{e.name}} ${{e.id}}`));
+  if (expected.resumePolicy !== "upload_file") {{
+    if (fileInputs.some(e => e.value)) errors.push("resume file input has a value but resume upload is not approved");
+    if (details.hasReplyFileInput && fileNames.length === 0) errors.push("DOU form requires a resume file but row resume_policy is not upload_file");
   }}
   if (expected.resumePolicy === "upload_file") {{
-    errors.push("resume upload is not implemented by this script");
+    const matched = fileNames.includes(expected.approvedResumeName);
+    details.approvedResumeMatched = matched;
+    if (!matched) errors.push("approved resume file was not attached to DOU form");
   }}
 
   const requiredEmpty = Array.from(root.querySelectorAll("input,textarea,select")).filter(visible)
@@ -498,6 +661,10 @@ def process_row(row: DouApplicationRow, endpoint: str, mode: str, log_path: Path
         tab = open_tab(endpoint, row.url)
         wait_for_page(tab, delay)
         before = inspect_state(tab)
+        if before.get("already_applied"):
+            append_log(log_path, {**base_event, "result": "already_applied", "before": before})
+            print(f"row {row.row_number}: already applied: {row.url}")
+            return 0
         opened = open_application_surface(tab)
         time.sleep(1.0)
         if not opened.get("ok"):
@@ -512,25 +679,42 @@ def process_row(row: DouApplicationRow, endpoint: str, mode: str, log_path: Path
             print(f"row {row.row_number}: fill failed: {filled.get('reason')}")
             return 4
 
+        resume_upload: dict[str, Any] | None = None
+        if row.resume_policy == "upload_file":
+            resume_upload = attach_resume_file(tab, row)
+            time.sleep(1.0)
+            if not resume_upload.get("ok"):
+                append_log(log_path, {**base_event, "result": "blocked_resume_upload", "before": before, "opened": opened, "filled": filled, "resume_upload": resume_upload})
+                print(f"row {row.row_number}: blocked: {resume_upload.get('reason', 'resume upload failed')}")
+                return 4
+
         presubmit = validate_before_submit(tab, row)
         if not presubmit.get("ok"):
-            append_log(log_path, {**base_event, "result": "blocked_presubmit_validation", "before": before, "opened": opened, "filled": filled, "presubmit": presubmit})
+            append_log(log_path, {**base_event, "result": "blocked_presubmit_validation", "before": before, "opened": opened, "filled": filled, "resume_upload": resume_upload, "presubmit": presubmit})
             print(f"row {row.row_number}: blocked before submit: {'; '.join(presubmit.get('errors', []))}")
             return 4
 
         if mode == "prepare":
-            append_log(log_path, {**base_event, "result": "pre_submit_validation_ok", "before": before, "opened": opened, "filled": filled, "presubmit": presubmit})
+            append_log(log_path, {**base_event, "result": "pre_submit_validation_ok", "before": before, "opened": opened, "filled": filled, "resume_upload": resume_upload, "presubmit": presubmit})
             print(f"row {row.row_number}: pre-submit validation ok; final submit not clicked: {row.url}")
             return 0
 
         submitted = submit_form(tab)
         time.sleep(3.0)
         after = inspect_state(tab)
+        after_url = str(after.get("url") or "").lower()
+        after_surfaces = after.get("application_surfaces") if isinstance(after.get("application_surfaces"), list) else []
+        sent_surface = any("sent" in str(surface.get("className") or "").lower() for surface in after_surfaces if isinstance(surface, dict))
         result = "submit_clicked_unconfirmed"
         body = str(after.get("body_start") or "").lower()
-        if any(token in body for token in ["\u0434\u044f\u043a\u0443", "\u0432\u0456\u0434\u0433\u0443\u043a \u043d\u0430\u0434\u0456\u0441\u043b", "application sent", "thank you"]):
+        if (
+            "?sent" in after_url
+            or "sent#replied-id" in after_url
+            or sent_surface
+            or any(token in body for token in ["\u0434\u044f\u043a\u0443", "\u0432\u0456\u0434\u0433\u0443\u043a \u043d\u0430\u0434\u0456\u0441\u043b", "\u0432\u0438 \u0432\u0456\u0434\u0433\u0443\u043a\u043d\u0443\u043b\u0438\u0441", "application sent", "thank you"])
+        ):
             result = "submitted_success"
-        append_log(log_path, {**base_event, "result": result, "before": before, "opened": opened, "filled": filled, "presubmit": presubmit, "submitted": submitted, "after": after})
+        append_log(log_path, {**base_event, "result": result, "before": before, "opened": opened, "filled": filled, "resume_upload": resume_upload, "presubmit": presubmit, "submitted": submitted, "after": after})
         print(f"row {row.row_number}: {result}: {row.url}")
         return 0 if result == "submitted_success" else 5
     except Exception as exc:

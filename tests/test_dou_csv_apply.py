@@ -34,6 +34,7 @@ def row(**overrides: object) -> DouApplicationRow:
         "linkedin_policy": "omit",
         "resume_policy": "no_resume",
         "approved_resume_name": "",
+        "approved_resume_path": "",
         "upload_allowed": False,
         "approved_to_submit": True,
         "final_submit_allowed": True,
@@ -60,7 +61,7 @@ class DouCsvApplyTest(unittest.TestCase):
         self.assertIn("approved_to_submit must be true", errors)
         self.assertIn("final_submit_allowed must be true", errors)
 
-    def test_upload_policy_is_blocked_without_file_reads(self) -> None:
+    def test_upload_policy_requires_exact_approved_resume_path(self) -> None:
         errors = dou_csv_apply.validate_row(
             row(
                 resume_policy="upload_file",
@@ -68,7 +69,21 @@ class DouCsvApplyTest(unittest.TestCase):
                 approved_resume_name="exact-approved.pdf",
             )
         )
-        self.assertIn("resume file upload is not implemented; no resume files will be read or uploaded", errors)
+        self.assertIn("approved_resume_path is required when resume_policy=upload_file", errors)
+
+    def test_upload_policy_accepts_existing_approved_resume_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            resume_dir = Path(tmp)
+            resume = resume_dir / "exact-approved.pdf"
+            resume.write_bytes(b"%PDF-1.4 test fixture")
+            approved = row(
+                resume_policy="upload_file",
+                upload_allowed=True,
+                approved_resume_name=resume.name,
+                approved_resume_path=str(resume),
+            )
+            with patch.object(dou_csv_apply, "DEFAULT_RESUME_DIR", resume_dir):
+                self.assertEqual(dou_csv_apply.validate_row(approved), [])
 
     def test_csv_rows_reject_company_vacancies_page(self) -> None:
         errors = dou_csv_apply.validate_row(row(url="https://jobs.dou.ua/companies/example/vacancies/"))
@@ -130,8 +145,8 @@ class DouCsvApplyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "approved.csv"
             csv_path.write_text(
-                "site,url,message,linkedin_policy,resume_policy,upload_allowed,approved_to_submit,final_submit_allowed\n"
-                f"dou,https://jobs.dou.ua/companies/example/vacancies/12345/,\"{APPROVED_MESSAGE}\",omit,no_resume,false,true,true\n",
+                "site,url,message,linkedin_policy,resume_policy,approved_resume_path,upload_allowed,approved_to_submit,final_submit_allowed\n"
+                f"dou,https://jobs.dou.ua/companies/example/vacancies/12345/,\"{APPROVED_MESSAGE}\",omit,no_resume,,false,true,true\n",
                 encoding="utf-8",
             )
 
@@ -193,6 +208,60 @@ class DouCsvApplyTest(unittest.TestCase):
         self.assertIn("const requiredEmpty = Array.from(root.querySelectorAll", expression)
         self.assertIn('if (requiredEmpty.length) errors.push("visible required fields are empty")', expression)
 
+    def test_presubmit_blocks_empty_dou_reply_file_when_upload_not_approved(self) -> None:
+        fake_tab = Mock()
+        fake_tab.eval.return_value = {"ok": True}
+
+        dou_csv_apply.validate_before_submit(fake_tab, row())
+
+        expression = fake_tab.eval.call_args.args[0]
+        self.assertIn("details.hasReplyFileInput", expression)
+        self.assertIn("DOU form requires a resume file but row resume_policy is not upload_file", expression)
+
+    def test_attach_resume_file_uses_reply_file_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            resume_dir = Path(tmp)
+            resume = resume_dir / "exact-approved.pdf"
+            resume.write_bytes(b"%PDF-1.4 test fixture")
+            approved = row(
+                resume_policy="upload_file",
+                upload_allowed=True,
+                approved_resume_name=resume.name,
+                approved_resume_path=str(resume),
+            )
+            fake_tab = Mock()
+            fake_tab.eval.side_effect = [
+                {"ok": True, "selector": "#reply_file"},
+                {"ok": True, "fileNames": [resume.name], "expectedName": resume.name},
+            ]
+            fake_tab.call.return_value = {"result": {"result": {"objectId": "input-1"}}}
+
+            with patch.object(dou_csv_apply, "DEFAULT_RESUME_DIR", resume_dir):
+                result = dou_csv_apply.attach_resume_file(fake_tab, approved)
+
+            self.assertTrue(result["ok"])
+            prepare_expression = fake_tab.eval.call_args_list[0].args[0]
+            self.assertIn('document.querySelector("#reply_file")', prepare_expression)
+            fake_tab.call.assert_any_call("DOM.setFileInputFiles", {"objectId": "input-1", "files": [str(resume)]})
+
+    def test_open_tab_reuses_existing_dou_tab_without_fragment(self) -> None:
+        pages = [
+            {
+                "type": "page",
+                "url": "https://jobs.dou.ua/companies/codetiburon/vacancies/360415/#apply",
+                "webSocketDebuggerUrl": "ws://existing",
+            }
+        ]
+        with (
+            patch.object(dou_csv_apply, "cdp_json", return_value=pages) as cdp_json,
+            patch.object(dou_csv_apply, "CdpTab", return_value="tab") as cdp_tab,
+        ):
+            tab = dou_csv_apply.open_tab("http://127.0.0.1:9222", "https://jobs.dou.ua/companies/codetiburon/vacancies/360415/")
+
+        self.assertEqual(tab, "tab")
+        cdp_json.assert_called_once_with("http://127.0.0.1:9222", "/json/list")
+        cdp_tab.assert_called_once_with("ws://existing")
+
     def test_execute_submits_only_after_presubmit_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "dou.jsonl"
@@ -212,6 +281,30 @@ class DouCsvApplyTest(unittest.TestCase):
             submit_form.assert_called_once()
             event = json.loads(log_path.read_text(encoding="utf-8").strip())
             self.assertEqual(event["result"], "submitted_success")
+
+    def test_execute_stops_before_form_when_dou_page_is_already_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "dou.jsonl"
+            fake_tab = Mock()
+            before = {
+                "url": "https://jobs.dou.ua/companies/example/vacancies/12345/?sent#replied-id",
+                "body_start": "Ви відгукнулись на цю вакансію",
+                "already_applied": True,
+            }
+            with (
+                patch.object(dou_csv_apply, "open_tab", return_value=fake_tab),
+                patch.object(dou_csv_apply, "wait_for_page"),
+                patch.object(dou_csv_apply, "inspect_state", return_value=before),
+                patch.object(dou_csv_apply, "open_application_surface") as open_application_surface,
+                patch.object(dou_csv_apply, "submit_form") as submit_form,
+            ):
+                rc = dou_csv_apply.process_row(row(), "http://127.0.0.1:9222", "execute", log_path, 0)
+
+            self.assertEqual(rc, 0)
+            open_application_surface.assert_not_called()
+            submit_form.assert_not_called()
+            event = json.loads(log_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(event["result"], "already_applied")
 
 
 if __name__ == "__main__":

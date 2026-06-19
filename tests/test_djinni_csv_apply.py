@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from djinni_csv_apply import (  # noqa: E402
     ApplicationRow,
     classify_no_apply_state,
+    eligibility_mismatch_fields,
     main,
     process_row,
     profile_update_blocker_fields,
@@ -161,6 +162,30 @@ class DjinniCsvApplyTests(unittest.TestCase):
                 "profile_update_required": True,
                 "profile_update_url": "https://djinni.co/my/profile/",
                 "profile_update_action_text": "Update profile",
+            },
+        )
+
+    def test_classifies_djinni_eligibility_mismatch_as_warning_blocker(self) -> None:
+        state = {
+            "eligibility_mismatch": True,
+            "profile_update_required": False,
+            "body_start": (
+                "Ваш профіль не відповідає деяким вимогам, вказаним компанією. "
+                "Ваші зарплатні очікування вищі, ніж вказана вилка. "
+                "Країни, де розглядаємо кандидатів: Країни ЄС."
+            ),
+        }
+
+        self.assertEqual(
+            classify_no_apply_state(state, {"ok": False, "reason": "no visible apply button"}),
+            "djinni eligibility mismatch: salary/location filters",
+        )
+        self.assertEqual(
+            eligibility_mismatch_fields(state),
+            {
+                "eligibility_mismatch": True,
+                "eligibility_mismatch_kind": "salary_location",
+                "eligibility_mismatch_excerpt": state["body_start"][:500],
             },
         )
 

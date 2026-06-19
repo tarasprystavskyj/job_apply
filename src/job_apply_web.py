@@ -23,7 +23,7 @@ from job_platforms.dou import is_dou_listing_url
 from job_platforms.progress import build_progress_snapshot
 from recruiter_response_scan import is_djinni_thread_url, message_digest, normalize_thread_url
 from resume_index import build_resume_index
-from vacancy_pipeline import OBSERVATION_PATHS, build_candidate_batch, candidate_summary
+from vacancy_pipeline import OBSERVATION_PATHS, build_candidate_batch, candidate_summary, latest_submission_by_url, terminal_submission_state
 
 
 STATE_PATH = ROOT / "data" / "job_waves" / "web_state.json"
@@ -41,6 +41,8 @@ SITE_LABELS = {
     "dou": "DOU",
     "robotaua": "Robota.ua",
 }
+DEFAULT_DOU_RESUME_PATH = ROOT / "data" / "resumes" / "Taras_Prystavskyj_AI_Automation_Resume_2026-06-11.pdf"
+DEFAULT_ROBOTAUA_RESUME_PATH = DEFAULT_DOU_RESUME_PATH
 ACTIONABLE_SITE_NAMES = set(SITE_LABELS)
 REVIEW_FLOW_NAMES = {"djinniinbox"}
 EXTRA_LIVE_COLUMNS = [
@@ -63,9 +65,7 @@ BUTTON_HINTS = {
         "save_selected": "Save only the checked rows as approved and clear approval from unchecked or blocked rows.",
         "approve_all": "Approve every currently supported application row and every review/reply row visible in this batch.",
         "clear_all": "Clear all row approvals in the current batch.",
-        "dry_run": "Run each site adapter in validation-only mode and append logs; no browser submit button is clicked.",
-        "prepare": "Open/fill/pre-validate approved application forms where supported, then stop before the final submit/send click.",
-        "send": "Run the final send path for approved rows only. Site adapters still enforce their CSV approval gates.",
+        "send": "Submit applications for the checked/approved rows only. Site adapters still enforce their CSV approval gates and write logs.",
     },
     "uk": {
         "scan": "Знайти свіжі вакансії з налаштованих джерел, оновити Djinni inbox, зібрати новий список кандидатів і нічого не відправляти.",
@@ -77,9 +77,7 @@ BUTTON_HINTS = {
         "save_selected": "Зберегти лише відмічені рядки як підтверджені і зняти підтвердження з інших або заблокованих рядків.",
         "approve_all": "Підтвердити всі поточно підтримані рядки заявок і всі review/reply рядки в цьому списку.",
         "clear_all": "Зняти всі підтвердження у поточному списку.",
-        "dry_run": "Запустити адаптери сайтів у режимі перевірки і записати логи; фінальна кнопка submit у браузері не натискається.",
-        "prepare": "Відкрити, заповнити і перевірити підтверджені форми, але зупинитись перед фінальним кліком submit/send.",
-        "send": "Запустити фінальну відправку лише для підтверджених рядків. Адаптери сайтів все одно перевіряють approval gates у CSV.",
+        "send": "Подати заявки лише на вибрані/підтверджені рядки. Адаптери сайтів все одно перевіряють approval gates у CSV і пишуть логи.",
     },
 }
 TEXT = {
@@ -102,9 +100,7 @@ TEXT = {
         "save_selected": "Save selected",
         "approve_all": "Approve all supported + review rows",
         "clear_all": "Clear all",
-        "dry_run": "Run validation dry-run",
-        "prepare": "Prepare / pre-submit",
-        "send": "Final send approved",
+        "send": "Submit selected applications",
         "ok": "OK",
         "company": "Company",
         "title": "Title",
@@ -146,9 +142,7 @@ TEXT = {
         "save_selected": "Зберегти вибрані",
         "approve_all": "Підтвердити всі supported + review",
         "clear_all": "Зняти всі",
-        "dry_run": "Запустити dry-run перевірку",
-        "prepare": "Підготувати / pre-submit",
-        "send": "Фінально надіслати підтверджені",
+        "send": "Подати заявки на вибрані",
         "ok": "OK",
         "company": "Компанія",
         "title": "Назва",
@@ -435,7 +429,24 @@ def normalize_row_for_site(row: dict[str, str], site: str, approve: bool = True)
     normalized["approved_to_submit"] = "true" if approve else "false"
     normalized["final_submit_allowed"] = "true" if approve else "false"
     normalized.setdefault("approved_resume_path", "")
-    if not has_exact_upload_gate(row, site):
+    if site == "dou" and not has_exact_upload_gate(row, site) and DEFAULT_DOU_RESUME_PATH.exists():
+        normalized["upload_allowed"] = "true"
+        normalized["approved_resume_name"] = DEFAULT_DOU_RESUME_PATH.name
+        normalized["approved_resume_path"] = str(DEFAULT_DOU_RESUME_PATH)
+        normalized["resume_policy"] = "upload_file"
+    elif site == "robotaua" and not has_exact_upload_gate(row, site) and DEFAULT_ROBOTAUA_RESUME_PATH.exists():
+        normalized["upload_allowed"] = "true"
+        normalized["approved_resume_name"] = DEFAULT_ROBOTAUA_RESUME_PATH.name
+        normalized["approved_resume_path"] = str(DEFAULT_ROBOTAUA_RESUME_PATH)
+        normalized["resume_policy"] = "upload_exact_resume"
+    elif site == "workua" and not has_exact_upload_gate(row, site):
+        normalized["upload_allowed"] = "false"
+        normalized["approved_resume_name"] = "Work.ua profile resume"
+        normalized["approved_resume_path"] = ""
+        normalized["resume_policy"] = "use_workua_profile"
+        normalized["message_policy"] = "profile_resume_only"
+        normalized["profile_resume_only_allowed"] = "true"
+    elif not has_exact_upload_gate(row, site):
         normalized["upload_allowed"] = "false"
         normalized["approved_resume_name"] = ""
         normalized["approved_resume_path"] = ""
@@ -444,7 +455,11 @@ def normalize_row_for_site(row: dict[str, str], site: str, approve: bool = True)
     linkedin = (normalized.get("linkedin") or "").strip()
 
     if site == "workua":
-        normalized["linkedin_policy"] = "fill_field" if linkedin else "no_linkedin"
+        if normalized.get("message_policy") == "profile_resume_only":
+            normalized["linkedin"] = ""
+            normalized["linkedin_policy"] = "no_linkedin"
+        else:
+            normalized["linkedin_policy"] = "fill_field" if linkedin else "no_linkedin"
     elif site == "dou":
         normalized["linkedin_policy"] = "fill_url" if linkedin else "omit"
     elif site == "robotaua":
@@ -460,10 +475,15 @@ def normalize_row_for_site(row: dict[str, str], site: str, approve: bool = True)
 
 
 def has_exact_upload_gate(row: dict[str, str], site: str) -> bool:
-    if site != "robotaua":
+    resume_policy = (row.get("resume_policy") or "").strip().lower()
+    expected_policy = {
+        "dou": "upload_file",
+        "robotaua": "upload_exact_resume",
+    }.get(site)
+    if not expected_policy:
         return False
     return (
-        (row.get("resume_policy") or "").strip().lower() == "upload_exact_resume"
+        resume_policy == expected_policy
         and (row.get("upload_allowed") or "").strip().lower() in {"1", "true", "yes", "y", "allowed", "approve", "approved"}
         and bool((row.get("approved_resume_name") or "").strip())
         and bool((row.get("approved_resume_path") or row.get("resume_path") or "").strip())
@@ -503,22 +523,27 @@ def update_batch_approvals(batch: Path, selected: set[int] | None = None, approv
 def count_approved_rows(batch: Path) -> int:
     with batch.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
+    history = latest_submission_by_url()
     return sum(
         1
         for row in rows
         if is_actionable_row(row)
         and row.get("approved_to_submit") == "true"
         and row.get("final_submit_allowed") == "true"
+        and not terminal_submission_state({"source_url": row.get("url", "")}, history)
     )
 
 
-def approved_rows_by_site(batch: Path) -> dict[str, list[dict[str, str]]]:
+def approved_rows_by_site(batch: Path, skip_submission_history: bool = False) -> dict[str, list[dict[str, str]]]:
     with batch.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
+    history = latest_submission_by_url() if skip_submission_history else {}
     grouped = {site: [] for site in ACTIONABLE_SITE_NAMES}
     for row in rows:
         site = supported_submit_site(row)
         if not site:
+            continue
+        if skip_submission_history and terminal_submission_state({"source_url": row.get("url", "")}, history):
             continue
         if row.get("approved_to_submit") == "true" and row.get("final_submit_allowed") == "true":
             grouped[site].append(normalize_row_for_site(row, site, approve=True))
@@ -560,6 +585,7 @@ def write_site_csv(site: str, rows: list[dict[str, str]], mode: str) -> Path:
             "linkedin_policy",
             "resume_policy",
             "approved_resume_name",
+            "approved_resume_path",
             "upload_allowed",
             "approved_to_submit",
             "final_submit_allowed",
@@ -713,7 +739,7 @@ def launch_review_runs(batch: Path, mode: str, stamp: str) -> list[dict[str, str
 def launch_approved_runs(batch: Path, mode: str) -> list[dict[str, str | int]]:
     jobs: list[dict[str, str | int]] = []
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    for site, rows in sorted(approved_rows_by_site(batch).items()):
+    for site, rows in sorted(approved_rows_by_site(batch, skip_submission_history=(mode == "submit")).items()):
         if not rows:
             continue
         csv_path = write_site_csv(site, rows, mode)
@@ -771,17 +797,23 @@ def event_has_submit_success_evidence(event: dict) -> bool:
     after_title = str(after.get("title") or "").lower()
     submitted = event.get("submitted")
     if isinstance(submitted, dict) and submitted.get("submitted") is True:
-        if "/jobseeker/my/resumes/sent/" in after_url:
+        if "/jobseeker/my/resumes/sent/" in after_url or "?sent" in after_url or "sent#replied-id" in after_url:
             return True
     success_markers = [
         "/jobseeker/my/resumes/sent/",
         "application-sent",
         "apply/success",
         "applied=true",
+        "?sent",
+        "sent#replied-id",
     ]
     if any(marker in after_url for marker in success_markers):
         return True
-    return "submitted" in after_title or "sent" in after_title
+    surfaces = after.get("application_surfaces") if isinstance(after.get("application_surfaces"), list) else []
+    if any("sent" in str(surface.get("className") or "").lower() for surface in surfaces if isinstance(surface, dict)):
+        return True
+    body = str(after.get("body_start") or "").lower()
+    return "submitted" in after_title or "sent" in after_title or "ви відгукнулись" in body
 
 
 def display_result(event: dict) -> str:
@@ -1144,8 +1176,6 @@ def render_all_sites_page(lang: str = "en") -> str:
       <button type="submit" {tooltip_attrs(hint_for(lang, "save_selected"))}>{html.escape(text_for(lang, 'save_selected'))}</button>
       <button type="submit" formaction="/approve-all" {tooltip_attrs(hint_for(lang, "approve_all"))}>{html.escape(text_for(lang, 'approve_all'))}</button>
       <button type="submit" formaction="/clear-approvals" {tooltip_attrs(hint_for(lang, "clear_all"))}>{html.escape(text_for(lang, 'clear_all'))}</button>
-      <button type="submit" formaction="/send-dry-run" {tooltip_attrs(hint_for(lang, "dry_run"))}>{html.escape(text_for(lang, 'dry_run'))}</button>
-      <button type="submit" formaction="/prepare" {tooltip_attrs(hint_for(lang, "prepare"))}>{html.escape(text_for(lang, 'prepare'))}</button>
       <button type="submit" formaction="/send" class="primary" {tooltip_attrs(hint_for(lang, "send"))}>{html.escape(text_for(lang, 'send'))}</button>
     </div>
     <table>

@@ -37,7 +37,7 @@ import websocket
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG = ROOT / "data" / "job_waves" / "robotaua_submission_attempts.jsonl"
 DEFAULT_RESUME_DIR = Path(os.environ.get("JOB_APPLY_RESUME_DIR", r"C:\python_scripts\projects_search\my_resumes"))
-APPROVED_RESUME_ARTIFACT_DIRS = (ROOT / "data" / "job_waves", ROOT / "data" / "approved_artifacts")
+APPROVED_RESUME_ARTIFACT_DIRS = (ROOT / "data" / "resumes", ROOT / "data" / "job_waves", ROOT / "data" / "approved_artifacts")
 ROBOTAU_ATTACH_SELECTOR = (
     "body > app-root > div > alliance-apply-page-shell > div > alliance-apply-page-new > "
     "div > div:nth-child(2) > div > lib-attach-apply-block > div > label > div"

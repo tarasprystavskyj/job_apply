@@ -15,7 +15,7 @@ import requests
 
 from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
-from job_apply_web import SITE_LABELS, count_approved_rows, display_result, launch_approved_runs, submission_log_events, update_batch_approvals
+from job_apply_web import SITE_LABELS, count_approved_rows, display_result, launch_approved_runs, submission_log_events
 from job_scan_sources import format_scan_summary, run_all_sources_scan
 from recruiter_response_scan import latest_response_summary, scan_recruiter_responses
 from resume_index import build_resume_index
@@ -215,15 +215,15 @@ class TelegramBot:
         if getattr(self, "_last_scan_status", ""):
             lines.append(str(self._last_scan_status))
             lines.append("")
-        lines.append("To approve and send all supported rows immediately: /approve_latest")
-        lines.append("Alias: /approve_and_send_latest")
+        lines.append("To send rows already approved in the web UI/CSV: /send_latest_approved")
+        lines.append("Aliases: /approve_latest, /approve_and_send_latest")
         lines.append("To scan again: /scan")
         return "\n".join(lines)
 
     def run_submit_and_report(self, batch: str, chat_id: str | int) -> None:
         try:
             jobs = launch_approved_runs(Path(batch), "submit")
-            message = f"Approved all-site batch started:\n{batch}"
+            message = f"Already-approved all-site batch started:\n{batch}"
             if jobs:
                 message += "\n\nJobs:\n" + "\n".join(
                     f"- {job.get('site')} rows={job.get('rows')} pid={job.get('pid')} log={job.get('stdout_log')}"
@@ -255,17 +255,20 @@ class TelegramBot:
         if not batch_path.exists():
             self.send(chat_id, f"Latest batch file does not exist: {batch}")
             return
-        changed, skipped = update_batch_approvals(batch_path, approve_all=True)
         approved_count = count_approved_all_rows(batch_path)
         if approved_count == 0:
-            self.send(chat_id, f"No supported rows for auto-approval in latest batch. blocked/review-only rows: {skipped}.")
+            self.send(
+                chat_id,
+                "No already-approved supported rows in latest batch. "
+                "Review exact messages/resume gates in the web UI first, then use /send_latest_approved.",
+            )
             return
         state["latest_batch"] = str(batch_path)
         save_state(state)
         threading.Thread(target=self.run_submit_and_report, args=(str(batch_path), chat_id)).start()
         self.send(
             chat_id,
-            f"Approved and started all-site batch: approved={approved_count}, changed={changed}, blocked={skipped}\n{batch_path}",
+            f"Started already-approved all-site batch: approved={approved_count}\n{batch_path}",
         )
 
     def handle_text(self, chat_id: str | int, text: str, state: dict[str, Any]) -> None:
@@ -278,10 +281,10 @@ class TelegramBot:
             self.send(chat_id, "Started all-sites scan. I will send the result when it finishes.")
             threading.Thread(target=self.run_scan_and_report, args=(state, chat_id)).start()
             return
-        if command in {"/approve_and_send_latest", "/approve_latest"}:
+        if command in {"/send_latest_approved", "/approve_and_send_latest", "/approve_latest"}:
             self.approve_latest(state, chat_id)
             return
-        self.send(chat_id, "Commands: /scan, /approve_latest, /approve_and_send_latest, /status")
+        self.send(chat_id, "Commands: /scan, /send_latest_approved, /approve_latest, /approve_and_send_latest, /status")
 
     def poll_once(self, state: dict[str, Any], timeout: int = 1) -> int:
         data = self.request(
