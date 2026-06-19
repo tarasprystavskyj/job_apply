@@ -128,6 +128,24 @@ def function_graph() -> dict[str, object]:
             "Parallel owner interface for daily 10:00 scans, status, approvals, blocker notices, auto-reply notices, and all-site approved sends.",
         ),
         FunctionNode(
+            "decision_telegram_batch_flow",
+            "Decision: Telegram batch flow",
+            "product",
+            "diamond",
+            "active",
+            "Owner decision: Telegram should support a simple flow where /scan creates awareness and /approve_and_send_latest approves and sends all supported application rows. Web UI remains the detailed per-vacancy review surface. The product goal is to help applicants and recruiters meet in the middle: high-fit, user-aware applications instead of low-quality mass spam.",
+            "owner",
+        ),
+        FunctionNode(
+            "evidence_agentic_consent_flow",
+            "Evidence: consent and recruiter trust",
+            "safety",
+            "hex",
+            "active",
+            "Decision evidence: agentic UX research favors intent previews before sensitive actions, human-in-the-loop pauses for high-impact operations, durable audit logs, and specific confirmation copy. Reddit/recruiter signals are mixed: applicants want time savings, recruiters dislike low-quality AI mass applications. Therefore batch send is allowed with awareness, supported application rows, logs, duplicate guards, and a web link for item-by-item review.",
+            "research",
+        ),
+        FunctionNode(
             "progress",
             "Progress graph",
             "observability",
@@ -159,6 +177,15 @@ def function_graph() -> dict[str, object]:
             "planned",
             "Evolve this function map into the main source of truth for requirements, owner decisions, blockers, and agent assignments.",
         ),
+        FunctionNode(
+            "graph_module_migration",
+            "Graph module migration task",
+            "product",
+            "box",
+            "planned",
+            "Pending task for agent 019ebd34-fb58-7d23-be7f-cc456828deef: move reusable graph/task-tracking implementation to the upper-level standalone module/project, then keep this repository's graph as a project-specific instance of that module. Current resume attempts are blocked by active agent thread limit.",
+            "graph-agent",
+        ),
     ]
     edges = [
         FunctionEdge("goal", "source_scan", "discovers"),
@@ -170,6 +197,9 @@ def function_graph() -> dict[str, object]:
         FunctionEdge("source_scan", "shared_db", "persists"),
         FunctionEdge("shared_db", "web", "feeds"),
         FunctionEdge("shared_db", "telegram", "feeds"),
+        FunctionEdge("telegram", "decision_telegram_batch_flow", "implements"),
+        FunctionEdge("evidence_agentic_consent_flow", "decision_telegram_batch_flow", "supports"),
+        FunctionEdge("decision_telegram_batch_flow", "approval", "defines batch gate"),
         FunctionEdge("shared_db", "progress", "feeds"),
         FunctionEdge("message_qa", "approval", "guards"),
         FunctionEdge("approval", "djinni", "permits final send"),
@@ -183,6 +213,7 @@ def function_graph() -> dict[str, object]:
         FunctionEdge("testing", "web", "verifies"),
         FunctionEdge("testing", "telegram", "verifies"),
         FunctionEdge("graph_tz", "goal", "defines"),
+        FunctionEdge("graph_tz", "graph_module_migration", "delegates"),
     ]
     return {
         "schema": "job.function_graph.v0",

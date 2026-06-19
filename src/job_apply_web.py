@@ -736,7 +736,7 @@ def launch_review_runs(batch: Path, mode: str, stamp: str) -> list[dict[str, str
     return [{"site": "djinni_inbox", "mode": mode, "rows": len(rows), "pid": pids[0] if pids else 0, "stdout_log": str(log_path), "jsonl_log": str(jsonl_log)}]
 
 
-def launch_approved_runs(batch: Path, mode: str) -> list[dict[str, str | int]]:
+def launch_approved_runs(batch: Path, mode: str, include_review_runs: bool = True) -> list[dict[str, str | int]]:
     jobs: list[dict[str, str | int]] = []
     stamp = time.strftime("%Y%m%d_%H%M%S")
     for site, rows in sorted(approved_rows_by_site(batch, skip_submission_history=(mode == "submit")).items()):
@@ -759,7 +759,8 @@ def launch_approved_runs(batch: Path, mode: str) -> list[dict[str, str | int]]:
                 "jsonl_log": str(jsonl_log),
             }
         )
-    jobs.extend(launch_review_runs(batch, mode, stamp))
+    if include_review_runs:
+        jobs.extend(launch_review_runs(batch, mode, stamp))
     return jobs
 
 

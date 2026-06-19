@@ -61,7 +61,7 @@ class TelegramBotCommandTests(unittest.TestCase):
                 }
             )
 
-    def test_send_latest_approved_command_does_not_approve_rows_before_running(self) -> None:
+    def test_approve_and_send_latest_command_approves_supported_application_rows(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             batch = Path(td) / "batch.csv"
             self.write_batch(batch)
@@ -72,28 +72,20 @@ class TelegramBotCommandTests(unittest.TestCase):
             bot.run_submit_and_report = lambda batch_arg, _chat_id: launched.append(batch_arg)
 
             with patch.object(job_apply_telegram_bot.threading, "Thread", ImmediateThread):
-                bot.handle_text(123, "/send_latest_approved", {"latest_batch": str(batch)})
+                bot.handle_text(123, "/approve_and_send_latest", {"latest_batch": str(batch)})
 
             with batch.open("r", encoding="utf-8-sig", newline="") as f:
                 rows = list(csv.DictReader(f))
-            self.assertEqual(rows[0]["approved_to_submit"], "false")
-            self.assertEqual(rows[0]["final_submit_allowed"], "false")
-            self.assertEqual(launched, [])
-            self.assertTrue(any("No already-approved supported rows" in text for text in sent))
+            self.assertEqual(rows[0]["approved_to_submit"], "true")
+            self.assertEqual(rows[0]["final_submit_allowed"], "true")
+            self.assertEqual(launched, [str(batch)])
+            self.assertTrue(any("Approved and started all-site application batch" in text for text in sent))
+            self.assertTrue(any("http://127.0.0.1:8097/" in text for text in sent))
 
-    def test_approve_latest_alias_sends_only_already_approved_rows(self) -> None:
+    def test_approve_latest_alias_uses_batch_approval_flow(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             batch = Path(td) / "batch.csv"
             self.write_batch(batch)
-            with batch.open("r", encoding="utf-8-sig", newline="") as f:
-                rows = list(csv.DictReader(f))
-                fields = list(rows[0])
-            rows[0]["approved_to_submit"] = "true"
-            rows[0]["final_submit_allowed"] = "true"
-            with batch.open("w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fields)
-                writer.writeheader()
-                writer.writerows(rows)
             sent: list[str] = []
             launched: list[str] = []
             bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
@@ -104,7 +96,59 @@ class TelegramBotCommandTests(unittest.TestCase):
                 bot.handle_text(123, "/approve_latest", {"latest_batch": str(batch)})
 
             self.assertEqual(launched, [str(batch)])
-            self.assertTrue(any("Started already-approved all-site batch" in text for text in sent))
+            self.assertTrue(any("Approved and started all-site application batch" in text for text in sent))
+
+    def test_approve_and_send_latest_skips_djinni_inbox_review_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            fields = [
+                "site",
+                "url",
+                "title",
+                "company",
+                "message",
+                "message_file",
+                "salary_usd",
+                "linkedin",
+                "resume_policy",
+                "approved_resume_name",
+                "approved_to_submit",
+                "final_submit_allowed",
+            ]
+            with batch.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "site": "djinniinbox",
+                        "url": "https://djinni.co/my/inbox/25880672/#last",
+                        "title": "Recruiter reply",
+                        "company": "Example",
+                        "message": "Thanks for your reply.",
+                        "message_file": "",
+                        "salary_usd": "",
+                        "linkedin": "",
+                        "resume_policy": "no_resume",
+                        "approved_resume_name": "",
+                        "approved_to_submit": "false",
+                        "final_submit_allowed": "false",
+                    }
+                )
+            sent: list[str] = []
+            launched: list[str] = []
+            bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+            bot.send = lambda _chat_id, text: sent.append(text)
+            bot.run_submit_and_report = lambda batch_arg, _chat_id: launched.append(batch_arg)
+
+            with patch.object(job_apply_telegram_bot.threading, "Thread", ImmediateThread):
+                bot.handle_text(123, "/approve_and_send_latest", {"latest_batch": str(batch)})
+
+            with batch.open("r", encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(rows[0]["approved_to_submit"], "false")
+            self.assertEqual(rows[0]["final_submit_allowed"], "false")
+            self.assertEqual(launched, [])
+            self.assertTrue(any("Review-only inbox rows skipped: 1" in text for text in sent))
 
     def test_latest_submission_blocker_summary_includes_all_site_logs(self) -> None:
         events = [

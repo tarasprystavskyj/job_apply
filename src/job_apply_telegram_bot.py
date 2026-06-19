@@ -15,7 +15,16 @@ import requests
 
 from djinni_inbox_scan import scan_inbox
 from job_apply_config import ROOT, settings
-from job_apply_web import SITE_LABELS, count_approved_rows, display_result, launch_approved_runs, submission_log_events
+from job_apply_web import (
+    SITE_LABELS,
+    approved_rows_by_site,
+    display_result,
+    ensure_live_fields,
+    launch_approved_runs,
+    normalize_row_for_site,
+    submission_log_events,
+    supported_submit_site,
+)
 from job_scan_sources import format_scan_summary, run_all_sources_scan
 from recruiter_response_scan import latest_response_summary, scan_recruiter_responses
 from resume_index import build_resume_index
@@ -66,8 +75,65 @@ def count_approved_djinni_rows(batch: Path) -> int:
     )
 
 
-def count_approved_all_rows(batch: Path) -> int:
-    return count_approved_rows(batch)
+def count_approved_application_rows(batch: Path) -> int:
+    grouped = approved_rows_by_site(batch, skip_submission_history=True)
+    return sum(len(rows) for rows in grouped.values())
+
+
+def approve_supported_application_rows(batch: Path) -> dict[str, Any]:
+    with batch.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fields = ensure_live_fields(list(reader.fieldnames or []))
+        rows = list(reader)
+    changed = 0
+    skipped = 0
+    by_site: dict[str, int] = {}
+    upload_rows = 0
+    review_rows = 0
+    for row in rows:
+        site = supported_submit_site(row)
+        if not site:
+            skipped += 1
+            if (row.get("site") or "").strip().lower() == "djinniinbox":
+                review_rows += 1
+            continue
+        row.update(normalize_row_for_site(row, site, approve=True))
+        changed += 1
+        by_site[site] = by_site.get(site, 0) + 1
+        if (row.get("upload_allowed") or "").strip().lower() in {"1", "true", "yes", "y", "allowed", "approve", "approved"}:
+            upload_rows += 1
+    with batch.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return {
+        "changed": changed,
+        "skipped": skipped,
+        "by_site": by_site,
+        "upload_rows": upload_rows,
+        "review_rows": review_rows,
+    }
+
+
+def batch_awareness_summary(batch: Path, stats: dict[str, Any] | None = None) -> str:
+    stats = stats or {}
+    by_site = stats.get("by_site") if isinstance(stats.get("by_site"), dict) else {}
+    site_parts = []
+    for site, count in sorted(by_site.items()):
+        label = SITE_LABELS.get(str(site), str(site))
+        site_parts.append(f"{label} {count}")
+    lines = [
+        "Awareness: this command approves and sends supported application rows on your behalf.",
+        "It does not send Djinni inbox replies, reject offers, or change profile settings.",
+        "Review/select one by one in the web UI: http://127.0.0.1:8097/",
+    ]
+    if site_parts:
+        lines.append("Sites: " + ", ".join(site_parts))
+    if stats.get("upload_rows"):
+        lines.append(f"Resume upload-gated rows: {stats['upload_rows']}")
+    if stats.get("review_rows"):
+        lines.append(f"Review-only inbox rows skipped: {stats['review_rows']}")
+    return "\n".join(lines)
 
 
 def load_submission_events(path: Path = SUBMISSION_LOG_PATH) -> list[dict[str, Any]]:
@@ -215,15 +281,15 @@ class TelegramBot:
         if getattr(self, "_last_scan_status", ""):
             lines.append(str(self._last_scan_status))
             lines.append("")
-        lines.append("To send rows already approved in the web UI/CSV: /send_latest_approved")
-        lines.append("Aliases: /approve_latest, /approve_and_send_latest")
+        lines.append("Review/select one by one: http://127.0.0.1:8097/")
+        lines.append("To approve and send all supported application rows immediately: /approve_and_send_latest")
         lines.append("To scan again: /scan")
         return "\n".join(lines)
 
     def run_submit_and_report(self, batch: str, chat_id: str | int) -> None:
         try:
-            jobs = launch_approved_runs(Path(batch), "submit")
-            message = f"Already-approved all-site batch started:\n{batch}"
+            jobs = launch_approved_runs(Path(batch), "submit", include_review_runs=False)
+            message = f"Approved all-site application batch started:\n{batch}"
             if jobs:
                 message += "\n\nJobs:\n" + "\n".join(
                     f"- {job.get('site')} rows={job.get('rows')} pid={job.get('pid')} log={job.get('stdout_log')}"
@@ -255,12 +321,13 @@ class TelegramBot:
         if not batch_path.exists():
             self.send(chat_id, f"Latest batch file does not exist: {batch}")
             return
-        approved_count = count_approved_all_rows(batch_path)
+        stats = approve_supported_application_rows(batch_path)
+        approved_count = count_approved_application_rows(batch_path)
         if approved_count == 0:
             self.send(
                 chat_id,
-                "No already-approved supported rows in latest batch. "
-                "Review exact messages/resume gates in the web UI first, then use /send_latest_approved.",
+                "No supported application rows can be sent from latest batch.\n"
+                + batch_awareness_summary(batch_path, stats),
             )
             return
         state["latest_batch"] = str(batch_path)
@@ -268,7 +335,8 @@ class TelegramBot:
         threading.Thread(target=self.run_submit_and_report, args=(str(batch_path), chat_id)).start()
         self.send(
             chat_id,
-            f"Started already-approved all-site batch: approved={approved_count}\n{batch_path}",
+            f"Approved and started all-site application batch: approved={approved_count}, changed={stats['changed']}, skipped={stats['skipped']}\n{batch_path}\n\n"
+            + batch_awareness_summary(batch_path, stats),
         )
 
     def handle_text(self, chat_id: str | int, text: str, state: dict[str, Any]) -> None:
@@ -281,10 +349,10 @@ class TelegramBot:
             self.send(chat_id, "Started all-sites scan. I will send the result when it finishes.")
             threading.Thread(target=self.run_scan_and_report, args=(state, chat_id)).start()
             return
-        if command in {"/send_latest_approved", "/approve_and_send_latest", "/approve_latest"}:
+        if command in {"/approve_and_send_latest", "/approve_latest"}:
             self.approve_latest(state, chat_id)
             return
-        self.send(chat_id, "Commands: /scan, /send_latest_approved, /approve_latest, /approve_and_send_latest, /status")
+        self.send(chat_id, "Commands: /scan, /approve_and_send_latest, /status")
 
     def poll_once(self, state: dict[str, Any], timeout: int = 1) -> int:
         data = self.request(

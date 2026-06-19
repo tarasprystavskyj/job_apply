@@ -218,8 +218,11 @@ class JobApplyWebTests(unittest.TestCase):
         self.assertIn("groupFilter", html)
         self.assertIn("Save graph note", html)
         self.assertIn("Message QA gate", html)
+        self.assertIn("Decision: Telegram batch flow", html)
+        self.assertIn("Graph module migration task", html)
         self.assertIn("data-detail=", html)
         self.assertTrue(any(node["id"] == "source_scan" for node in graph["nodes"]))
+        self.assertTrue(any(node["id"] == "evidence_agentic_consent_flow" for node in graph["nodes"]))
 
     def test_function_map_notes_persist_comments_and_subtasks(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -397,6 +400,37 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertEqual([row["url"] for row in grouped["djinni"]], ["https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/"])
             self.assertEqual(grouped["dou"], [])
             self.assertEqual([job["site"] for job in jobs], ["djinni", "djinni_inbox"])
+            self.assertEqual(len(popen_commands), 1)
+            self.assertIn("djinni_csv_apply.py", popen_commands[0][1])
+
+    def test_launch_can_exclude_review_runs_for_telegram_batch_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            rows = [
+                row("djinni", "https://djinni.co/jobs/827863-ai-infrastructure-engineer-python/"),
+                row("djinni_inbox", "https://djinni.co/my/inbox/25880123/#last"),
+            ]
+            for item in rows:
+                item["approved_to_submit"] = "true"
+                item["final_submit_allowed"] = "true"
+            write_batch(batch, rows)
+
+            class FakeProcess:
+                pid = 12345
+
+            popen_commands: list[list[str]] = []
+
+            def fake_popen(cmd: list[str], **kwargs: object) -> FakeProcess:
+                popen_commands.append(cmd)
+                return FakeProcess()
+
+            with (
+                patch.object(job_apply_web, "WEB_RUNS_DIR", Path(td)),
+                patch.object(job_apply_web.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                jobs = job_apply_web.launch_approved_runs(batch, "dry-run", include_review_runs=False)
+
+            self.assertEqual([job["site"] for job in jobs], ["djinni"])
             self.assertEqual(len(popen_commands), 1)
             self.assertIn("djinni_csv_apply.py", popen_commands[0][1])
 
