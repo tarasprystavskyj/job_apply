@@ -155,6 +155,23 @@ class VacancyPipelineTests(unittest.TestCase):
 
         self.assertFalse(actionable)
 
+    def test_inbox_navigation_rows_are_not_actionable(self) -> None:
+        for title, url in [
+            ("Відкрити", "https://djinni.co/jobs/832864-staff-lead-full-stack-engineer-ai-commerce/?ref=inbox_suggested"),
+            ("Більше", "https://djinni.co/my/inbox/#"),
+        ]:
+            with self.subTest(title=title):
+                actionable = vacancy_pipeline.is_actionable_inbox_offer(
+                    {
+                        "source_url": url,
+                        "title": title,
+                        "snippet": "",
+                        "recommendation": "review",
+                    }
+                )
+
+                self.assertFalse(actionable)
+
     def test_submission_history_reads_terminal_results_for_all_sites(self) -> None:
         events = [
             {
@@ -218,6 +235,34 @@ class VacancyPipelineTests(unittest.TestCase):
             text = output.read_text(encoding="utf-8")
 
         self.assertNotIn("https://www.work.ua/jobs/8170878/", text)
+
+    def test_candidate_batch_excludes_previously_submitted_inbox_job_url(self) -> None:
+        inbox_offer = {
+            "source_site": "djinni_inbox",
+            "source_url": "https://djinni.co/jobs/832864-staff-lead-full-stack-engineer-ai-commerce/?ref=inbox_suggested",
+            "title": "Staff / Lead Full-Stack Engineer (AI / Commerce)",
+            "company": "Example",
+            "snippet": "Relevant suggested job",
+            "recommendation": "review",
+            "score": 50,
+        }
+        submitted = {
+            "source_url": "https://djinni.co/jobs/832864-staff-lead-full-stack-engineer-ai-commerce/",
+            "result": "submitted_success",
+            "attempted_at": "2026-06-19T19:00:00+0300",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "batch.csv"
+            with (
+                patch.object(vacancy_pipeline, "latest_observations", return_value=[]),
+                patch.object(vacancy_pipeline, "latest_inbox_offers", return_value=[inbox_offer]),
+                patch.object(vacancy_pipeline, "latest_submission_by_url", return_value=vacancy_pipeline.latest_submission_by_url([submitted])),
+            ):
+                vacancy_pipeline.build_candidate_batch(limit=10, output=output)
+
+            text = output.read_text(encoding="utf-8")
+
+        self.assertNotIn("832864-staff-lead-full-stack-engineer-ai-commerce", text)
 
     def test_terminal_submission_history_survives_later_blocker_noise(self) -> None:
         events = [

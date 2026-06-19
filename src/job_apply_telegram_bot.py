@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -25,7 +26,7 @@ from job_apply_web import (
     submission_log_events,
     supported_submit_site,
 )
-from job_scan_sources import format_scan_summary, run_all_sources_scan
+from job_scan_sources import DEFAULT_QUERY, format_scan_summary, run_all_sources_scan
 from recruiter_response_scan import latest_response_summary, scan_recruiter_responses
 from resume_index import build_resume_index
 from vacancy_pipeline import build_candidate_batch, candidate_summary
@@ -34,6 +35,7 @@ from vacancy_pipeline import build_candidate_batch, candidate_summary
 STATE_PATH = ROOT / "data" / "job_waves" / "telegram_state.json"
 WEB_STATE_PATH = ROOT / "data" / "job_waves" / "web_state.json"
 SUBMISSION_LOG_PATH = ROOT / "data" / "job_waves" / "djinni_csv_submission_attempts.jsonl"
+CHAT_PREFERENCES_PATH = ROOT / "data" / "job_waves" / "telegram_agent_preferences.json"
 
 
 def load_state() -> dict[str, Any]:
@@ -45,6 +47,63 @@ def load_state() -> dict[str, Any]:
 def save_state(state: dict[str, Any]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_chat_preferences(path: Path | None = None) -> dict[str, Any]:
+    path = path or CHAT_PREFERENCES_PATH
+    if not path.exists():
+        return {"notes": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        return {"notes": []}
+    if not isinstance(data.get("notes"), list):
+        data["notes"] = []
+    return data
+
+
+def save_chat_preferences(preferences: dict[str, Any], path: Path | None = None) -> None:
+    path = path or CHAT_PREFERENCES_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(preferences, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def update_chat_preferences_from_text(text: str, path: Path | None = None) -> tuple[dict[str, Any], list[str]]:
+    preferences = load_chat_preferences(path)
+    changes: list[str] = []
+    clean = text.strip()
+    preferences.setdefault("notes", []).append({"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "text": clean})
+
+    query_match = re.search(r"(?:^|\b)(?:пошук|query|search)\s*[:=]\s*(.+)", clean, re.I)
+    if query_match:
+        query = query_match.group(1).strip()
+        if query:
+            preferences["search_query"] = query
+            changes.append(f"search_query={query}")
+
+    lower = clean.lower()
+    if "супров" in lower or "cover" in lower or "лист" in lower:
+        preferences["cover_letter_guidance"] = clean
+        changes.append("cover_letter_guidance=updated")
+    if "локац" in lower or "location" in lower or "remote" in lower or "onsite" in lower:
+        preferences["location_guidance"] = clean
+        changes.append("location_guidance=updated")
+
+    preferences["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    save_chat_preferences(preferences, path)
+    return preferences, changes
+
+
+def chat_preferences_summary(preferences: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "Agent chat settings:",
+            f"search_query={preferences.get('search_query') or DEFAULT_QUERY}",
+            f"cover_letter_guidance={'set' if preferences.get('cover_letter_guidance') else 'not set'}",
+            f"location_guidance={'set' if preferences.get('location_guidance') else 'not set'}",
+            f"notes={len(preferences.get('notes') or [])}",
+        ]
+    )
 
 
 def sync_web_state_latest_batch(batch: Path, status: str) -> None:
@@ -320,7 +379,10 @@ class TelegramBot:
             self.send(chat_id, text[:3900])
 
     def scan(self, chat_id: str | int | None = None) -> Path:
+        preferences = load_chat_preferences()
+        query_text = str(preferences.get("search_query") or DEFAULT_QUERY)
         summary = run_all_sources_scan(
+            query_text=query_text,
             limit=10,
             max_pages=1,
             include_recruiter_responses=True,
@@ -328,6 +390,30 @@ class TelegramBot:
         )
         self._last_scan_status = format_scan_summary(summary)
         return Path(str(summary["batch"]))
+
+    def start_config_chat(self, chat_id: str | int, state: dict[str, Any]) -> None:
+        state["chat_mode"] = "config"
+        save_state(state)
+        self.send(
+            chat_id,
+            "\n".join(
+                [
+                    "Config chat enabled.",
+                    "Write preferences in plain text. Examples:",
+                    "пошук: Python AI automation FastAPI LLM",
+                    "супровідні листи: більше акценту на multi-agent automation і production reliability",
+                    "локація: Lviv onsite/hybrid, Kyiv remote, USA remote",
+                    "",
+                    "Use /done to leave config chat. /scan will use the saved search query.",
+                    chat_preferences_summary(load_chat_preferences()),
+                ]
+            ),
+        )
+
+    def handle_config_chat(self, chat_id: str | int, text: str, state: dict[str, Any]) -> None:
+        preferences, changes = update_chat_preferences_from_text(text)
+        change_text = ", ".join(changes) if changes else "note saved"
+        self.send(chat_id, f"Saved: {change_text}\n\n{chat_preferences_summary(preferences)}")
 
     def format_batch(self, batch: Path) -> str:
         rows = candidate_summary(batch)
@@ -414,6 +500,14 @@ class TelegramBot:
         if command in {"/start", "/status"}:
             self.send(chat_id, f"JobApply bot ready. latest_batch={state.get('latest_batch') or 'none'}\n\n{latest_submission_blocker_summary()}")
             return
+        if command in {"/чат", "/chat"}:
+            self.start_config_chat(chat_id, state)
+            return
+        if command in {"/done", "/чат_стоп", "/chat_stop"}:
+            state.pop("chat_mode", None)
+            save_state(state)
+            self.send(chat_id, "Config chat disabled. Commands: /scan, /approve_and_send_latest, /status, /чат")
+            return
         if command == "/scan":
             self.send(chat_id, "Started all-sites scan. I will send the result when it finishes.")
             threading.Thread(target=self.run_scan_and_report, args=(state, chat_id)).start()
@@ -421,7 +515,10 @@ class TelegramBot:
         if command in {"/approve_and_send_latest", "/approve_latest"}:
             self.approve_latest(state, chat_id)
             return
-        self.send(chat_id, "Commands: /scan, /approve_and_send_latest, /status")
+        if state.get("chat_mode") == "config" and text.strip() and not text.strip().startswith("/"):
+            self.handle_config_chat(chat_id, text, state)
+            return
+        self.send(chat_id, "Commands: /scan, /approve_and_send_latest, /status, /чат")
 
     def poll_once(self, state: dict[str, Any], timeout: int = 1) -> int:
         data = self.request(

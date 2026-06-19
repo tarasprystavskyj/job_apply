@@ -153,7 +153,13 @@ def is_active_public_vacancy(row: dict[str, Any]) -> bool:
 
 
 def is_actionable_inbox_offer(row: dict[str, Any]) -> bool:
-    text = " ".join([str(row.get("title", "")), str(row.get("snippet", "")), str(row.get("reason", ""))]).lower()
+    title = clean_text(row.get("title"))
+    if title.lower() in {"відкрити", "більше", "open", "more"}:
+        return False
+    url = str(row.get("source_url") or row.get("thread_url") or "")
+    if url.rstrip("/#").endswith("/my/inbox"):
+        return False
+    text = " ".join([title, str(row.get("snippet", "")), str(row.get("reason", ""))]).lower()
     system_tokens = [
         "відкрити листування",
         "open conversation",
@@ -165,7 +171,6 @@ def is_actionable_inbox_offer(row: dict[str, Any]) -> bool:
     self_reply_tokens = ["ви:", "you:", "relevant resume:", "best regards", "taras prystavskyj"]
     if any(token in text for token in [*system_tokens, *self_reply_tokens]):
         return False
-    url = str(row.get("source_url") or row.get("thread_url") or "")
     normalized_url = normalize_djinni_thread_url(url)
     if normalized_url and normalized_url in previously_replied_thread_urls():
         return False
@@ -436,6 +441,7 @@ def build_candidate_batch(limit: int = 10, output: Path | None = None) -> Path:
             row
             for row in latest_inbox_offers()
             if normalize_submission_url(str(row.get("source_url") or row.get("thread_url") or "")) not in skipped_urls
+            and terminal_submission_state({"source_url": str(row.get("source_url") or row.get("thread_url") or "")}, history) == ""
             and is_actionable_inbox_offer(row)
         ],
         key=batch_score,

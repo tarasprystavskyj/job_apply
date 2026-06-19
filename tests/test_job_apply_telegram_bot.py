@@ -150,6 +150,38 @@ class TelegramBotCommandTests(unittest.TestCase):
             self.assertEqual(launched, [])
             self.assertTrue(any("Review-only inbox rows skipped: 1" in text for text in sent))
 
+    def test_chat_command_saves_search_query_for_next_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            prefs = Path(td) / "prefs.json"
+            batch = Path(td) / "batch.csv"
+            batch.write_text("site,url,title,company\n", encoding="utf-8")
+            state = {}
+            sent: list[str] = []
+            query_calls: list[str] = []
+            bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+            bot.cfg = type("Cfg", (), {"recruiter_auto_reply_enabled": False})()
+            bot.send = lambda _chat_id, text: sent.append(text)
+
+            def fake_scan(**kwargs):
+                query_calls.append(kwargs["query_text"])
+                return {"batch": str(batch), "notes": {}, "errors": {}}
+
+            with (
+                patch.object(job_apply_telegram_bot, "CHAT_PREFERENCES_PATH", prefs),
+                patch.object(job_apply_telegram_bot, "run_all_sources_scan", side_effect=fake_scan),
+                patch.object(job_apply_telegram_bot, "format_scan_summary", return_value="scan ok"),
+            ):
+                bot.handle_text(123, "/чат", state)
+                bot.handle_text(123, "пошук: Python FastAPI LLM remote", state)
+                bot.scan(chat_id=123)
+
+            self.assertEqual(state["chat_mode"], "config")
+            self.assertEqual(query_calls, ["Python FastAPI LLM remote"])
+            data = json.loads(prefs.read_text(encoding="utf-8"))
+            self.assertEqual(data["search_query"], "Python FastAPI LLM remote")
+            self.assertTrue(any("Config chat enabled" in text for text in sent))
+            self.assertTrue(any("search_query=Python FastAPI LLM remote" in text for text in sent))
+
     def test_latest_submission_blocker_summary_includes_all_site_logs(self) -> None:
         events = [
             {
