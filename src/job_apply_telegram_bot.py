@@ -40,7 +40,7 @@ CHAT_PREFERENCES_PATH = ROOT / "data" / "job_waves" / "telegram_agent_preference
 
 def load_state() -> dict[str, Any]:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return json.loads(STATE_PATH.read_text(encoding="utf-8-sig"))
     return {"offset": 0, "latest_batch": "", "last_daily_date": ""}
 
 
@@ -119,6 +119,20 @@ def sync_web_state_latest_batch(batch: Path, status: str) -> None:
     state["status"] = status
     state["last_send_jobs"] = []
     WEB_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def latest_batch_from_disk() -> str:
+    for path in [STATE_PATH, WEB_STATE_PATH]:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError:
+            continue
+        batch = str(data.get("latest_batch") or "").strip()
+        if batch:
+            return batch
+    return ""
 
 
 def count_approved_djinni_rows(batch: Path) -> int:
@@ -468,7 +482,7 @@ class TelegramBot:
             self.send(chat_id, f"Scan failed: {type(exc).__name__}: {exc}")
 
     def approve_latest(self, state: dict[str, Any], chat_id: str | int) -> None:
-        batch = state.get("latest_batch")
+        batch = state.get("latest_batch") or latest_batch_from_disk()
         if not batch:
             self.send(chat_id, "No latest batch. Run /scan first.")
             return

@@ -38,6 +38,16 @@ class StopRun(Exception):
 
 
 class TelegramBotCommandTests(unittest.TestCase):
+    def test_load_state_accepts_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "telegram_state.json"
+            state_path.write_text('\ufeff{"latest_batch": "batch.csv"}', encoding="utf-8")
+
+            with patch.object(job_apply_telegram_bot, "STATE_PATH", state_path):
+                state = job_apply_telegram_bot.load_state()
+
+            self.assertEqual(state["latest_batch"], "batch.csv")
+
     def write_batch(self, path: Path) -> None:
         fields = [
             "site",
@@ -110,6 +120,30 @@ class TelegramBotCommandTests(unittest.TestCase):
             self.assertEqual(launched, [str(batch)])
             self.assertTrue(any("Approved and started all-site application batch" in text for text in sent))
 
+    def test_approve_latest_falls_back_to_persisted_batch_when_memory_state_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            batch = base / "batch.csv"
+            state_path = base / "telegram_state.json"
+            web_state_path = base / "web_state.json"
+            self.write_batch(batch)
+            state_path.write_text(json.dumps({"latest_batch": str(batch)}), encoding="utf-8")
+            sent: list[str] = []
+            launched: list[str] = []
+            bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+            bot.send = lambda _chat_id, text: sent.append(text)
+            bot.run_submit_and_report = lambda batch_arg, _chat_id: launched.append(batch_arg)
+
+            with (
+                patch.object(job_apply_telegram_bot, "STATE_PATH", state_path),
+                patch.object(job_apply_telegram_bot, "WEB_STATE_PATH", web_state_path),
+                patch.object(job_apply_telegram_bot.threading, "Thread", ImmediateThread),
+            ):
+                bot.handle_text(123, "/approve_and_send_latest", {})
+
+            self.assertEqual(launched, [str(batch)])
+            self.assertFalse(any("No latest batch" in text for text in sent))
+
     def test_approve_and_send_latest_skips_djinni_inbox_review_rows(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             batch = Path(td) / "batch.csv"
@@ -165,6 +199,7 @@ class TelegramBotCommandTests(unittest.TestCase):
     def test_chat_command_saves_search_query_for_next_scan(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             prefs = Path(td) / "prefs.json"
+            state_path = Path(td) / "telegram_state.json"
             batch = Path(td) / "batch.csv"
             batch.write_text("site,url,title,company\n", encoding="utf-8")
             state = {}
@@ -180,6 +215,7 @@ class TelegramBotCommandTests(unittest.TestCase):
 
             with (
                 patch.object(job_apply_telegram_bot, "CHAT_PREFERENCES_PATH", prefs),
+                patch.object(job_apply_telegram_bot, "STATE_PATH", state_path),
                 patch.object(job_apply_telegram_bot, "run_all_sources_scan", side_effect=fake_scan),
                 patch.object(job_apply_telegram_bot, "format_scan_summary", return_value="scan ok"),
             ):
