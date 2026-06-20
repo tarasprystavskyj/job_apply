@@ -564,7 +564,11 @@ class TelegramBot:
         state = load_state()
         threading.Thread(target=self.scheduler_loop, daemon=True).start()
         while True:
-            self.poll_once(state, timeout=25)
+            try:
+                self.poll_once(state, timeout=25)
+            except requests.exceptions.RequestException as exc:
+                print(f"telegram polling transient error: {type(exc).__name__}: {exc}", file=sys.stderr)
+                time.sleep(5)
 
 
 if __name__ == "__main__":

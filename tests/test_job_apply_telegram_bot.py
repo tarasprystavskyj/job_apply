@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +23,18 @@ class ImmediateThread:
 
     def start(self) -> None:
         self.target(*self.args, **self.kwargs)
+
+
+class NoopThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self) -> None:
+        pass
+
+
+class StopRun(Exception):
+    pass
 
 
 class TelegramBotCommandTests(unittest.TestCase):
@@ -181,6 +193,29 @@ class TelegramBotCommandTests(unittest.TestCase):
             self.assertEqual(data["search_query"], "Python FastAPI LLM remote")
             self.assertTrue(any("Config chat enabled" in text for text in sent))
             self.assertTrue(any("search_query=Python FastAPI LLM remote" in text for text in sent))
+
+    def test_run_survives_telegram_polling_timeout(self) -> None:
+        bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+        bot.scheduler_loop = Mock()
+        calls = {"count": 0}
+
+        def fake_poll(_state, timeout=25):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise job_apply_telegram_bot.requests.exceptions.ReadTimeout("telegram timeout")
+            raise StopRun()
+
+        bot.poll_once = fake_poll
+
+        with (
+            patch.object(job_apply_telegram_bot, "load_state", return_value={}),
+            patch.object(job_apply_telegram_bot.threading, "Thread", NoopThread),
+            patch.object(job_apply_telegram_bot.time, "sleep"),
+        ):
+            with self.assertRaises(StopRun):
+                bot.run()
+
+        self.assertEqual(calls["count"], 2)
 
     def test_latest_submission_blocker_summary_includes_all_site_logs(self) -> None:
         events = [
