@@ -253,6 +253,53 @@ class TelegramBotCommandTests(unittest.TestCase):
 
         self.assertEqual(calls["count"], 2)
 
+    def test_redact_error_hides_telegram_token(self) -> None:
+        bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+        bot.cfg = type("Cfg", (), {"telegram_bot_token": "123:secret-token"})()
+        exc = job_apply_telegram_bot.requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='api.telegram.org', url='/bot123:secret-token/getUpdates')"
+        )
+
+        text = bot.redact_error(exc)
+
+        self.assertNotIn("123:secret-token", text)
+        self.assertIn("<telegram-token>", text)
+
+    def test_djinni_unread_summary_lists_unread_threads(self) -> None:
+        summary = {
+            "notes": {
+                "djinni_inbox": {
+                    "unread_count": 1,
+                    "unread": [
+                        {
+                            "title": "Interview invitation",
+                            "company": "Acme",
+                            "url": "https://djinni.co/my/inbox/25880123/",
+                        }
+                    ],
+                }
+            },
+            "errors": {},
+        }
+
+        text = job_apply_telegram_bot.djinni_unread_summary(summary)
+
+        self.assertIn("Djinni inbox unread: 1", text)
+        self.assertIn("Acme: Interview invitation", text)
+        self.assertIn("https://djinni.co/my/inbox/25880123/", text)
+
+    def test_format_batch_includes_last_djinni_unread_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            self.write_batch(batch)
+            bot = job_apply_telegram_bot.TelegramBot.__new__(job_apply_telegram_bot.TelegramBot)
+            bot._last_djinni_unread_summary = "Djinni inbox unread: 1 message/thread(s)."
+            bot._last_scan_status = "scan ok"
+
+            text = bot.format_batch(batch)
+
+            self.assertIn("Djinni inbox unread: 1 message/thread(s).", text)
+
     def test_latest_submission_blocker_summary_includes_all_site_logs(self) -> None:
         events = [
             {

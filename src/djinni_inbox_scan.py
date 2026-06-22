@@ -40,6 +40,8 @@ class InboxOffer:
     score: int
     recommendation: str
     reason: str
+    unread: bool = False
+    unread_hint: str = ""
     approved_to_reject: bool = False
     reject_executed: bool = False
 
@@ -78,10 +80,21 @@ def inspect_inbox(tab: CdpTab) -> dict[str, Any]:
     const root = a.closest("article, li, tr, .list-jobs__item, .card, .conversation, .thread, .row") || a.parentElement;
     const text = clean(root ? root.innerText : a.innerText);
     if (!text || text.length < 20) continue;
+    const rootClass = clean(root ? root.className : "");
+    const markerText = clean([
+      rootClass,
+      root ? root.getAttribute("aria-label") : "",
+      root ? root.getAttribute("data-testid") : "",
+      root ? root.getAttribute("data-test") : "",
+    ].join(" "));
+    const unreadByClass = /\bunread\b|not-read|new-message|has-new|unseen|unread-message/i.test(markerText);
+    const unreadByChild = !!(root && root.querySelector('[class*="unread" i], [class*="new-message" i], [class*="unseen" i], [aria-label*="unread" i], [title*="unread" i]'));
     offerLinks.push({
       href,
       anchorText: clean(a.innerText),
       text: text.slice(0, 1800),
+      unread: unreadByClass || unreadByChild,
+      unreadHint: (unreadByClass ? markerText : "").slice(0, 220),
     });
   }
   const seen = new Set();
@@ -106,6 +119,8 @@ def inspect_inbox(tab: CdpTab) -> dict[str, Any]:
     title: document.title,
     bodyStart: body.slice(0, 2000),
     offers,
+    unreadCount: offers.filter(item => item.unread).length,
+    unreadOffers: offers.filter(item => item.unread).slice(0, 8),
     buttons,
   };
 })()
@@ -173,6 +188,8 @@ def normalize_offer(raw: dict[str, Any]) -> InboxOffer:
         score=score,
         recommendation=recommendation,
         reason=reason,
+        unread=bool(raw.get("unread")),
+        unread_hint=str(raw.get("unreadHint", "")),
     )
 
 
@@ -223,11 +240,23 @@ def scan_inbox(output: Path = DEFAULT_OUTPUT, execute_profile_toggle: bool = Fal
         state = inspect_inbox(tab)
         rows = [normalize_offer(raw) for raw in state.get("offers", [])]
         write_jsonl(output, rows)
+        unread_rows = [row for row in rows if row.unread]
         return {
             "ok": True,
             "url": state.get("url"),
             "profile": profile,
             "offers_found": len(rows),
+            "unread_count": len(unread_rows),
+            "unread": [
+                {
+                    "title": row.title,
+                    "company": row.company,
+                    "url": row.thread_url or row.source_url,
+                    "score": row.score,
+                    "recommendation": row.recommendation,
+                }
+                for row in unread_rows[:8]
+            ],
             "digest": sum(1 for row in rows if row.recommendation == "digest"),
             "review": sum(1 for row in rows if row.recommendation == "review"),
             "reject_candidate": sum(1 for row in rows if row.recommendation == "reject_candidate"),

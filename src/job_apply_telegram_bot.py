@@ -342,6 +342,33 @@ def current_jobs_summary(jobs: list[dict[str, Any]]) -> str:
     return f"Current batch results: {count_text}\n\n{blocker_summary_from_events(events)}"
 
 
+def djinni_unread_summary(scan_summary: dict[str, Any] | None) -> str:
+    if not scan_summary:
+        return "Djinni inbox unread: unknown."
+    notes = scan_summary.get("notes") if isinstance(scan_summary.get("notes"), dict) else {}
+    inbox = notes.get("djinni_inbox") if isinstance(notes.get("djinni_inbox"), dict) else {}
+    if not inbox:
+        errors = scan_summary.get("errors") if isinstance(scan_summary.get("errors"), dict) else {}
+        if "djinni_inbox" in errors:
+            return f"Djinni inbox unread: scan failed ({errors['djinni_inbox']})."
+        return "Djinni inbox unread: unknown."
+    unread = int(inbox.get("unread_count") or 0)
+    if unread <= 0:
+        return "Djinni inbox unread: none detected."
+    lines = [f"Djinni inbox unread: {unread} message/thread(s)."]
+    for item in (inbox.get("unread") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or "Unread Djinni message"
+        company = item.get("company") or ""
+        url = item.get("url") or ""
+        label = f"- {company}: {title}" if company else f"- {title}"
+        lines.append(label)
+        if url:
+            lines.append(str(url))
+    return "\n".join(lines)
+
+
 def djinni_profile_update_proposal_lines() -> list[str]:
     return [
         "I can prepare a Djinni profile update draft. No profile fields will be changed or saved without separate explicit approval.",
@@ -375,6 +402,13 @@ class TelegramBot:
     def send(self, chat_id: str | int, text: str) -> None:
         self.request("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
 
+    def redact_error(self, exc: BaseException) -> str:
+        text = f"{type(exc).__name__}: {exc}"
+        token = str(getattr(getattr(self, "cfg", None), "telegram_bot_token", "") or "")
+        if token:
+            text = text.replace(token, "<telegram-token>")
+        return text
+
     def notify_auto_reply_events(self, events: list[dict[str, Any]], chat_id: str | int | None) -> None:
         if not chat_id:
             return
@@ -403,6 +437,7 @@ class TelegramBot:
             execute_recruiter_auto_reply=self.cfg.recruiter_auto_reply_enabled,
         )
         self._last_scan_status = format_scan_summary(summary)
+        self._last_djinni_unread_summary = djinni_unread_summary(summary)
         return Path(str(summary["batch"]))
 
     def start_config_chat(self, chat_id: str | int, state: dict[str, Any]) -> None:
@@ -444,6 +479,9 @@ class TelegramBot:
         lines.append("")
         lines.append(latest_response_summary())
         lines.append("")
+        if getattr(self, "_last_djinni_unread_summary", ""):
+            lines.append(str(self._last_djinni_unread_summary))
+            lines.append("")
         lines.append(latest_submission_blocker_summary())
         lines.append("")
         if getattr(self, "_last_scan_status", ""):
@@ -581,7 +619,7 @@ class TelegramBot:
             try:
                 self.poll_once(state, timeout=25)
             except requests.exceptions.RequestException as exc:
-                print(f"telegram polling transient error: {type(exc).__name__}: {exc}", file=sys.stderr)
+                print(f"telegram polling transient error: {self.redact_error(exc)}", file=sys.stderr)
                 time.sleep(5)
 
 

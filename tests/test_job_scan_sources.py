@@ -48,6 +48,18 @@ class JobScanSourcesTests(unittest.TestCase):
         self.assertTrue(any(call.get("urls") for call in calls))
         self.assertEqual([item["kind"] for item in summary["fallback_attempts"]], ["primary", "description_search", "broader_query"])
 
+    def test_format_scan_summary_includes_djinni_unread_count(self) -> None:
+        summary = {
+            "batch": "candidate.csv",
+            "notes": {"djinni_inbox": {"unread_count": 2}, "dou": {}},
+            "errors": {},
+        }
+
+        text = job_scan_sources.format_scan_summary(summary)
+
+        self.assertIn("djinni_inbox=ok unread=2", text)
+        self.assertIn("dou=ok", text)
+
 
 if __name__ == "__main__":
     unittest.main()

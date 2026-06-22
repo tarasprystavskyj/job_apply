@@ -196,7 +196,10 @@ def format_scan_summary(summary: dict[str, Any]) -> str:
     parts = [f"all-sites scan built batch: {summary.get('batch', '')}"]
     for key in ["djinni_inbox", "djinni_recruiter_responses", "dou", "workua", "robotaua"]:
         if key in notes:
-            parts.append(f"{key}=ok")
+            if key == "djinni_inbox" and isinstance(notes.get(key), dict):
+                parts.append(f"{key}=ok unread={int(notes[key].get('unread_count') or 0)}")
+            else:
+                parts.append(f"{key}=ok")
         if key in errors:
             parts.append(f"{key}=blocked ({errors[key]})")
     return "; ".join(parts)
