@@ -45,6 +45,7 @@ DEFAULT_DOU_RESUME_PATH = ROOT / "data" / "resumes" / "Taras_Prystavskyj_AI_Auto
 DEFAULT_ROBOTAUA_RESUME_PATH = DEFAULT_DOU_RESUME_PATH
 ACTIONABLE_SITE_NAMES = set(SITE_LABELS)
 REVIEW_FLOW_NAMES = {"djinniinbox"}
+TRUTHY = {"1", "true", "yes", "y", "allowed", "approve", "approved"}
 EXTRA_LIVE_COLUMNS = [
     "linkedin_policy",
     "message_policy",
@@ -80,6 +81,10 @@ BUTTON_HINTS = {
         "send": "Подати заявки лише на вибрані/підтверджені рядки. Адаптери сайтів все одно перевіряють approval gates у CSV і пишуть логи.",
     },
 }
+
+
+def truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in TRUTHY
 TEXT = {
     "en": {
         "app_title": "Job Apply Automation",
@@ -444,8 +449,14 @@ def normalize_row_for_site(row: dict[str, str], site: str, approve: bool = True)
         normalized["approved_resume_name"] = "Work.ua profile resume"
         normalized["approved_resume_path"] = ""
         normalized["resume_policy"] = "use_workua_profile"
-        normalized["message_policy"] = "profile_resume_only"
-        normalized["profile_resume_only_allowed"] = "true"
+        requested_message_policy = (normalized.get("message_policy") or "").strip().lower()
+        profile_only_allowed = truthy(normalized.get("profile_resume_only_allowed"))
+        if requested_message_policy == "profile_resume_only" and profile_only_allowed:
+            normalized["message_policy"] = "profile_resume_only"
+            normalized["profile_resume_only_allowed"] = "true"
+        else:
+            normalized["message_policy"] = "exact_message"
+            normalized["profile_resume_only_allowed"] = "false"
     elif not has_exact_upload_gate(row, site):
         normalized["upload_allowed"] = "false"
         normalized["approved_resume_name"] = ""

@@ -496,13 +496,13 @@ class JobApplyWebTests(unittest.TestCase):
             update_batch_approvals(batch, approve_all=True)
             grouped = approved_rows_by_site(batch)
 
-            self.assertEqual(grouped["workua"][0]["linkedin_policy"], "no_linkedin")
+            self.assertEqual(grouped["workua"][0]["linkedin_policy"], "fill_field")
             self.assertEqual(grouped["dou"][0]["linkedin_policy"], "fill_url")
             self.assertEqual(grouped["robotaua"][0]["linkedin_policy"], "include_linkedin")
             self.assertEqual(grouped["workua"][0]["resume_policy"], "use_workua_profile")
             self.assertEqual(grouped["workua"][0]["upload_allowed"], "false")
-            self.assertEqual(grouped["workua"][0]["message_policy"], "profile_resume_only")
-            self.assertEqual(grouped["workua"][0]["profile_resume_only_allowed"], "true")
+            self.assertEqual(grouped["workua"][0]["message_policy"], "exact_message")
+            self.assertEqual(grouped["workua"][0]["profile_resume_only_allowed"], "false")
             self.assertEqual(grouped["workua"][0]["approved_resume_name"], "Work.ua profile resume")
             self.assertEqual(grouped["robotaua"][0]["resume_policy"], "upload_exact_resume")
             self.assertEqual(grouped["robotaua"][0]["upload_allowed"], "true")
@@ -611,10 +611,35 @@ class JobApplyWebTests(unittest.TestCase):
             self.assertEqual(approved["approved_resume_name"], resume.name)
             self.assertEqual(approved["approved_resume_path"], str(resume))
 
-    def test_workua_rows_get_profile_resume_only_gate_by_default(self) -> None:
+    def test_workua_rows_default_to_exact_message_with_profile_resume(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             batch = Path(td) / "batch.csv"
             values = row("workua", "https://www.work.ua/jobs/7768869/")
+            fields = list(values)
+            with batch.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(values)
+
+            changed, skipped = update_batch_approvals(batch, approve_all=True)
+            grouped = approved_rows_by_site(batch)
+
+            self.assertEqual((changed, skipped), (1, 0))
+            approved = grouped["workua"][0]
+            self.assertEqual(approved["resume_policy"], "use_workua_profile")
+            self.assertEqual(approved["message_policy"], "exact_message")
+            self.assertEqual(approved["profile_resume_only_allowed"], "false")
+            self.assertEqual(approved["linkedin"], LINKEDIN)
+            self.assertEqual(approved["linkedin_policy"], "fill_field")
+            self.assertEqual(approved["upload_allowed"], "false")
+            self.assertEqual(approved["approved_resume_name"], "Work.ua profile resume")
+
+    def test_workua_rows_preserve_explicit_profile_resume_only_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            batch = Path(td) / "batch.csv"
+            values = row("workua", "https://www.work.ua/jobs/7768869/")
+            values["message_policy"] = "profile_resume_only"
+            values["profile_resume_only_allowed"] = "true"
             fields = list(values)
             with batch.open("w", encoding="utf-8", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fields)
